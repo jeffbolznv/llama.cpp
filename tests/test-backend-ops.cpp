@@ -3916,6 +3916,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_1,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q3_K,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_K,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K,   GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));

@@ -156,6 +156,7 @@ struct vk_device_struct {
     vk::PhysicalDeviceProperties properties;
     std::string name;
     uint64_t max_memory_allocation_size;
+    uint64_t suballocation_block_size;
     bool fp16;
     bool pipeline_robustness;
     vk::Device device;
@@ -2279,6 +2280,16 @@ static vk_device ggml_vk_get_device(size_t idx) {
         } else {
             device->max_memory_allocation_size = props3.maxMemoryAllocationSize;
         }
+
+        const char* GGML_VK_SUBALLOCATION_BLOCK_SIZE = getenv("GGML_VK_SUBALLOCATION_BLOCK_SIZE");
+
+        if (GGML_VK_SUBALLOCATION_BLOCK_SIZE != nullptr) {
+            device->suballocation_block_size = std::stoul(GGML_VK_SUBALLOCATION_BLOCK_SIZE);
+        } else {
+            // Limit batching of allocations to 1GB by default to avoid fragmentation issues
+            device->suballocation_block_size = 1024*1024*1024;
+        }
+        device->suballocation_block_size = std::min(device->suballocation_block_size, device->max_memory_allocation_size);
 
         device->vendor_id = device->properties.vendorID;
         device->subgroup_size = subgroup_props.subgroupSize;
@@ -7561,7 +7572,7 @@ static size_t ggml_backend_vk_buffer_type_get_alignment(ggml_backend_buffer_type
 
 static size_t ggml_backend_vk_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
     ggml_backend_vk_buffer_type_context * ctx = (ggml_backend_vk_buffer_type_context *) buft->context;
-    return ctx->device->max_memory_allocation_size;
+    return ctx->device->suballocation_block_size;
 }
 
 static size_t ggml_backend_vk_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {

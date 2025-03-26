@@ -3856,6 +3856,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
 
+    for (uint32_t i = 1; i < 10; ++i) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K,    GGML_TYPE_F32, 32,  1, 256*i, { 1,  1}, {1, 1}));
+    }
+    //return test_cases;
+
+
     // unary ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
         for (int v : {0, 1}) {

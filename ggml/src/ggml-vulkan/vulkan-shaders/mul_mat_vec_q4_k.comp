@@ -1,8 +1,12 @@
 #version 450
 
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
 
 #include "mul_mat_vec_base.comp"
+
+layout (binding = 1) readonly buffer Bq8_1 {block_q8_1 data_b_q8_1[];};
+layout (binding = 1) readonly buffer Bq8_1_packed32 {block_q8_1_packed32 data_b_q8_1_packed32[];};
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
@@ -25,7 +29,8 @@ void calc_superblock(const uint a_offset, const uint b_offset, const uint v_im, 
         const uint32_t scale_0_4_l = (scale4_u32 << 16) | scale0_u32;
         const uint32_t scale_0_4_h = (scale_0_4_l & 0xC0C0C0C0) >> 2;
         const vec4 scale_0_4_l_f = vec4(unpack8(scale_0_4_l & 0x3F3F3F3F));
-        const vec4 scale8_f = vec4(unpack8((((scale8_u32 << 12) | scale8_u32) & 0x0F0F0F0F) | scale_0_4_h));
+        const uint scale8 = (((scale8_u32 << 12) | scale8_u32) & 0x0F0F0F0F) | scale_0_4_h;
+        const vec4 scale8_f = vec4(unpack8(scale8));
 
         const FLOAT_TYPE sc0 = scale_0_4_l_f.x;
         const FLOAT_TYPE sc1 = scale_0_4_l_f.y;
@@ -67,6 +72,7 @@ void calc_superblock(const uint a_offset, const uint b_offset, const uint v_im, 
         const FLOAT_TYPE q4_15 = qs64_hi4.w;
 
         [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        #if 0
             vec4 by10 =  vec4(data_b_v4[(j*p.batch_stride_b + b_offset + y1_idx) / 4    ]);
             vec4 by132 = vec4(data_b_v4[(j*p.batch_stride_b + b_offset + y1_idx) / 4 + 8]);
             vec4 by20 =  vec4(data_b_v4[(j*p.batch_stride_b + b_offset + y2_idx) / 4    ]);
@@ -82,6 +88,42 @@ void calc_superblock(const uint a_offset, const uint b_offset, const uint v_im, 
                 fma(FLOAT_TYPE(by10.z), sc2, fma(FLOAT_TYPE(by132.z), sc3, fma(FLOAT_TYPE(by20.z), sc6, fma(FLOAT_TYPE(by232.z), sc7,
                 fma(FLOAT_TYPE(by10.w), sc2, fma(FLOAT_TYPE(by132.w), sc3, fma(FLOAT_TYPE(by20.w), sc6,     FLOAT_TYPE(by232.w) * sc7)))))))))))))));
             temp[j][n] = fma(dall, fma(sx, sc0, fma(sy, sc1, fma(sz, sc4, sw * sc5))), fma(-dmin, smin, temp[j][n]));
+        #else
+            uint32_t block1_idx = (j*p.batch_stride_b + b_offset + y1_idx) >> 5;
+            uint32_t block1_offset = (j*p.batch_stride_b + b_offset + y1_idx) & 0x1F;
+
+            int32_t by10i  = data_b_q8_1_packed32[block1_idx + 0].qs[block1_offset / 4];
+            int32_t by132i = data_b_q8_1_packed32[block1_idx + 1].qs[block1_offset / 4];
+
+            uint32_t block2_idx = (j*p.batch_stride_b + b_offset + y2_idx) >> 5;
+            uint32_t block2_offset = (j*p.batch_stride_b + b_offset + y2_idx) & 0x1F;
+
+            int32_t by20i  = data_b_q8_1_packed32[block2_idx + 0].qs[block2_offset / 4];
+            int32_t by232i = data_b_q8_1_packed32[block2_idx + 1].qs[block2_offset / 4];
+
+            uint sc0i = (scale_0_4_l >>  0) & 0x3F;
+            uint sc1i = (scale_0_4_l >>  8) & 0x3F;
+            uint sc2i = (scale_0_4_l >> 16) & 0x3F;
+            uint sc3i = (scale_0_4_l >> 24) & 0x3F;
+
+            uint sc4i = (scale8 >>  0) & 0xFF;
+            uint sc5i = (scale8 >>  8) & 0xFF;
+            uint sc6i = (scale8 >> 16) & 0xFF;
+            uint sc7i = (scale8 >> 24) & 0xFF;
+
+            const FLOAT_TYPE sx = float(dotPacked4x8EXT(qs0_u32_lo4, by10i)   * int(sc0i)) * float(data_b_q8_1[block1_idx + 0].ds.x);
+            const FLOAT_TYPE sy = float(dotPacked4x8EXT(qs0_u32_hi4, by132i)  * int(sc1i)) * float(data_b_q8_1[block1_idx + 1].ds.x);
+            const FLOAT_TYPE sz = float(dotPacked4x8EXT(qs64_u32_lo4, by20i)  * int(sc4i)) * float(data_b_q8_1[block2_idx + 0].ds.x);
+            const FLOAT_TYPE sw = float(dotPacked4x8EXT(qs64_u32_hi4, by232i) * int(sc5i)) * float(data_b_q8_1[block2_idx + 1].ds.x);
+
+            const FLOAT_TYPE smin =
+                float(dotPacked4x8EXT(0x01010101, by10i)  * int(sc2i)) * float(data_b_q8_1[block1_idx + 0].ds.x) + 
+                float(dotPacked4x8EXT(0x01010101, by132i) * int(sc3i)) * float(data_b_q8_1[block1_idx + 1].ds.x) + 
+                float(dotPacked4x8EXT(0x01010101, by20i)  * int(sc6i)) * float(data_b_q8_1[block2_idx + 0].ds.x) + 
+                float(dotPacked4x8EXT(0x01010101, by232i) * int(sc7i)) * float(data_b_q8_1[block2_idx + 1].ds.x);
+
+            temp[j][n] = fma(dall, sx + sy + sz + sw, fma(-dmin, smin, temp[j][n]));
+        #endif
         }
     }
 }

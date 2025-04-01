@@ -321,6 +321,10 @@ void matmul_shaders(bool fp16, bool matmul_id, bool coopmat, bool coopmat2, bool
 
     auto const &FLOAT_TYPE = [&](const std::string &t) -> std::string {
         if (t == "bf16") {
+            // scalar path promotes to float
+            if (!coopmat && !coopmat2) {
+                return "float";
+            }
             return "bfloat16_t";
         }
         if (coopmat2 || fp16) {
@@ -343,8 +347,11 @@ void matmul_shaders(bool fp16, bool matmul_id, bool coopmat, bool coopmat2, bool
         // For aligned matmul loads
         std::string load_vec_a = coopmat2 ? "1" : "4";
 
-        string_to_spv(shader_name + "_bf16_aligned", source_name, merge_maps(base_dict, {{"FLOAT_TYPE", FLOAT_TYPE("bf16")}, {"DATA_A_BF16", "1"}, {"LOAD_VEC_A", load_vec_a},           {"LOAD_VEC_B", "4"}, {"B_TYPE", coopmat2 ? "bfloat16_t" : "bf16vec4"},  {"D_TYPE", "float"}, {"B_IS_FLOAT", "1"}, {"ALIGNED", "1"}}), fp16, coopmat, coopmat2, f16acc);
-        string_to_spv(shader_name + "_bf16",         source_name, merge_maps(base_dict, {{"FLOAT_TYPE", FLOAT_TYPE("bf16")}, {"DATA_A_BF16", "1"}, {"LOAD_VEC_A", load_vec_a_unaligned},                      {"B_TYPE", "bfloat16_t"},                          {"D_TYPE", "float"}, {"B_IS_FLOAT", "1"}}),                   fp16, coopmat, coopmat2, f16acc);
+        // scalar path promotes to float
+        std::string to_float_type = (coopmat || coopmat2) ? "uintBitsToBFloat16EXT" : "bf16_to_fp32";
+
+        string_to_spv(shader_name + "_bf16_aligned", source_name, merge_maps(base_dict, {{"FLOAT_TYPE", FLOAT_TYPE("bf16")}, {"TO_FLOAT_TYPE", to_float_type}, {"DATA_A_BF16", "1"}, {"LOAD_VEC_A", load_vec_a},           {"LOAD_VEC_B", "4"}, {"B_TYPE", coopmat2 ? "uint16_t" : "u16vec4"},   {"D_TYPE", "float"}, {"B_IS_FLOAT", "1"}, {"ALIGNED", "1"}}), fp16, coopmat, coopmat2, f16acc);
+        string_to_spv(shader_name + "_bf16",         source_name, merge_maps(base_dict, {{"FLOAT_TYPE", FLOAT_TYPE("bf16")}, {"TO_FLOAT_TYPE", to_float_type}, {"DATA_A_BF16", "1"}, {"LOAD_VEC_A", load_vec_a_unaligned},                      {"B_TYPE", "uint16_t"},                          {"D_TYPE", "float"}, {"B_IS_FLOAT", "1"}}),                   fp16, coopmat, coopmat2, f16acc);
     }
 #endif
 

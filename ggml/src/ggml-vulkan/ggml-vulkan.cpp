@@ -887,6 +887,9 @@ struct vk_instance_t {
 
 static bool vk_instance_initialized = false;
 static vk_instance_t vk_instance;
+#if defined(_WIN32)
+static bool normal_priority = true;
+#endif
 
 #ifdef GGML_VULKAN_CHECK_RESULTS
 static size_t vk_skip_checks;
@@ -901,12 +904,26 @@ typedef void (*ggml_vk_func_t)(ggml_backend_vk_context * ctx, vk_context& subctx
 
 static void ggml_backend_vk_free(ggml_backend_t backend);
 
+static void ggml_vk_wait_for_fence(vk_device& device, vk::Fence fence, const char *message) {
+#if defined(_WIN32)
+    if (normal_priority) {
+        SetThreadPriority(GetCurrentThread(), 1);
+    }
+#endif
+    VK_CHECK(device->device.waitForFences({ fence }, true, UINT64_MAX), message);
+#if defined(_WIN32)
+    if (normal_priority) {
+        SetThreadPriority(GetCurrentThread(), 0);
+    }
+#endif
+}
+
 // Wait for ctx->fence to be signaled.
-static void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx) {
+static void ggml_vk_wait_for_ctx_fence(ggml_backend_vk_context * ctx) {
     // Use waitForFences while most of the graph executes. Hopefully the CPU can sleep
     // during this wait.
     if (ctx->almost_ready_fence_pending) {
-        VK_CHECK(ctx->device->device.waitForFences({ ctx->almost_ready_fence }, true, UINT64_MAX), "almost_ready_fence");
+        ggml_vk_wait_for_fence(ctx->device, ctx->almost_ready_fence, "almost_ready_fence");
         ctx->device->device.resetFences({ ctx->almost_ready_fence });
         ctx->almost_ready_fence_pending = false;
     }
@@ -3381,6 +3398,10 @@ static void ggml_vk_instance_init() {
     }
     GGML_LOG_DEBUG("ggml_vulkan: Found %zu Vulkan devices:\n", vk_instance.device_indices.size());
 
+#if defined(_WIN32)
+    normal_priority = (GetPriorityClass(GetCurrentProcess()) == NORMAL_PRIORITY_CLASS);
+#endif
+
     for (size_t i = 0; i < vk_instance.device_indices.size(); i++) {
         ggml_vk_print_gpu_info(i);
     }
@@ -4031,7 +4052,7 @@ static void ggml_vk_buffer_write_2d(vk_buffer& dst, size_t offset, const void * 
         }
 
         ggml_vk_submit(subctx, dst->device->fence);
-        VK_CHECK(dst->device->device.waitForFences({ dst->device->fence }, true, UINT64_MAX), "vk_buffer_write_2d waitForFences");
+        ggml_vk_wait_for_fence(dst->device, dst->device->fence, "vk_buffer_write_2d waitForFences");
         dst->device->device.resetFences({ dst->device->fence });
     }
 }
@@ -4115,7 +4136,7 @@ static void ggml_vk_buffer_read(vk_buffer& src, size_t offset, void * dst, size_
         ggml_vk_ctx_end(subctx);
 
         ggml_vk_submit(subctx, src->device->fence);
-        VK_CHECK(src->device->device.waitForFences({ src->device->fence }, true, UINT64_MAX), "vk_buffer_read waitForFences");
+        ggml_vk_wait_for_fence(src->device, src->device->fence, "vk_buffer_read waitForFences");
         src->device->device.resetFences({ src->device->fence });
 
         for (auto& cpy : subctx->out_memcpys) {
@@ -4143,7 +4164,7 @@ static void ggml_vk_buffer_copy(vk_buffer& dst, size_t dst_offset, vk_buffer& sr
         ggml_vk_buffer_copy_async(subctx, dst, dst_offset, src, src_offset, size);
         ggml_vk_ctx_end(subctx);
         ggml_vk_submit(subctx, src->device->fence);
-        VK_CHECK(src->device->device.waitForFences({ src->device->fence }, true, UINT64_MAX), "vk_buffer_copy waitForFences");
+        ggml_vk_wait_for_fence(src->device, src->device->fence, "vk_buffer_copy waitForFences");
         src->device->device.resetFences({ src->device->fence });
     } else {
         VK_LOG_DEBUG("ggml_vk_buffer_copy(MULTI_DEVICE, " << size << ")");
@@ -4175,7 +4196,7 @@ static void ggml_vk_buffer_memset(vk_buffer& dst, size_t offset, uint32_t c, siz
     ggml_vk_ctx_end(subctx);
 
     ggml_vk_submit(subctx, dst->device->fence);
-    VK_CHECK(dst->device->device.waitForFences({ dst->device->fence }, true, UINT64_MAX), "vk_memset waitForFences");
+    ggml_vk_wait_for_fence(dst->device, dst->device->fence, "vk_memset waitForFences");
     dst->device->device.resetFences({ dst->device->fence });
 }
 
@@ -7296,7 +7317,7 @@ static void ggml_vk_test_matmul(ggml_backend_vk_context * ctx, size_t m, size_t 
 
     auto begin = std::chrono::high_resolution_clock::now();
     ggml_vk_submit(subctx, ctx->fence);
-    VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "ggml_vk_test_matmul waitForFences");
+    ggml_vk_wait_for_fence(ctx->device, ctx->fence, "ggml_vk_test_matmul waitForFences");
     ctx->device->device.resetFences({ ctx->fence });
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -7505,7 +7526,7 @@ static void ggml_vk_test_dequant(ggml_backend_vk_context * ctx, size_t ne, ggml_
     auto begin = std::chrono::high_resolution_clock::now();
 
     ggml_vk_submit(subctx, ctx->fence);
-    VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "ggml_vk_test_dequant waitForFences");
+    ggml_vk_wait_for_fence(ctx->device, ctx->fence, "ggml_vk_test_dequant waitForFences");
     ctx->device->device.resetFences({ ctx->fence });
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -7604,7 +7625,7 @@ static void ggml_vk_test_dequant(ggml_backend_vk_context * ctx, size_t ne, ggml_
 //     auto begin = std::chrono::high_resolution_clock::now();
 //
 //     ggml_vk_submit(subctx, ctx->fence);
-//     VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "ggml_vk_test_quantize waitForFences");
+//     ggml_vk_wait_for_fence(ctx->device, ctx->fence, "ggml_vk_test_quantize waitForFences");
 //     ctx->device->device.resetFences({ ctx->fence });
 //
 //     auto end = std::chrono::high_resolution_clock::now();
@@ -7797,7 +7818,7 @@ static void ggml_vk_test_dequant_matmul(ggml_backend_vk_context * ctx, size_t m,
     auto begin = std::chrono::high_resolution_clock::now();
 
     ggml_vk_submit(subctx, ctx->fence);
-    VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "ggml_vk_test_dequant waitForFences");
+    ggml_vk_wait_for_fence(ctx->device, ctx->fence, "ggml_vk_test_dequant waitForFences");
     ctx->device->device.resetFences({ ctx->fence });
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -8518,7 +8539,7 @@ static bool ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_tensor *
         }
 
         if (use_fence) {
-            ggml_vk_wait_for_fence(ctx);
+            ggml_vk_wait_for_ctx_fence(ctx);
         }
 #ifdef GGML_VULKAN_CHECK_RESULTS
         ggml_vk_check_results_1(tensor);
@@ -8951,7 +8972,7 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     }
 
     ggml_vk_submit(transfer_ctx, ctx->fence);
-    ggml_vk_wait_for_fence(ctx);
+    ggml_vk_wait_for_ctx_fence(ctx);
 
     for (auto& cpy : transfer_ctx->out_memcpys) {
         memcpy(cpy.dst, cpy.src, cpy.n);

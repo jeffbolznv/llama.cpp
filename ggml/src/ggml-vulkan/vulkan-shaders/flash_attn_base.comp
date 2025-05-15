@@ -105,3 +105,58 @@ ACC_TYPE perElemOpComputeSlope(const in uint32_t r, const in uint32_t c, const i
 
     return ACC_TYPE(pow(base, ACC_TYPE(exph)));
 }
+
+uint32_t i, N, KV, split_k_index, Tr, start_j, end_j,
+         iq2, iq3, rk2, rk3, rv2, rv3, ik2, ik3, iv2, iv3,
+         q_stride, k_stride, v_stride, m_stride;
+
+void init_indices()
+{
+    N = p.N;
+    KV = p.KV;
+
+    i = gl_WorkGroupID.x;
+    split_k_index = 0;
+
+    if (p.k_num > 1) {
+        i = 0;
+        split_k_index = gl_WorkGroupID.x;
+    }
+
+    Tr = CEIL_DIV(N, Br);
+
+    start_j = split_k_index * p.split_kv / Bc;
+    end_j = CEIL_DIV(min(KV, (split_k_index + 1) * p.split_kv), Bc);
+
+    // When not using grouped query attention, all rows share the same iq2, equal to gl_WorkGroupID.y.
+    // When using grouped query attention, each workgroup does gqa_ratio consecutive values of iq2.
+    iq2 = gl_WorkGroupID.y * p.gqa_ratio;
+    iq3 = gl_WorkGroupID.z;
+
+    // broadcast factors
+    rk2 = p.neq2/p.nek2;
+    rk3 = p.neq3/p.nek3;
+
+    rv2 = p.neq2/p.nev2;
+    rv3 = p.neq3/p.nev3;
+
+    // k indices
+    ik3 = iq3 / rk3;
+    ik2 = iq2 / rk2;
+
+    // v indices
+    iv3 = iq3 / rv3;
+    iv2 = iq2 / rv2;
+
+    // nb?1 are already divided by the type size and are in units of elements.
+    // When using grouped query attention, Q is indexed by iq2, so the stride
+    // should be nb02 (which is in bytes).
+    q_stride = p.gqa_ratio > 1 ? (p.nb02 / 4) : p.nb01;
+    k_stride = p.nb11;
+    v_stride = p.nb21;
+    // When using grouped query attention, all rows use the same mask (stride 0).
+    // "p.gqa_ratio >> 16" is just a roundabout way of writing zero
+    // that prevents the compiler from folding the "&" through the select
+    // and breaking the alignment detection.
+    m_stride = (p.gqa_ratio > 1) ? (p.gqa_ratio >> 16) : KV;
+}

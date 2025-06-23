@@ -1640,6 +1640,7 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.data         =*/ obj_alloc_size > 0 ? (void *)(result + 1) : data,
         /*.name         =*/ { 0 },
         /*.extra        =*/ NULL,
+        /*.use_count    =*/ 0,
         /*.padding      =*/ { 0 },
     };
 
@@ -5962,6 +5963,7 @@ static void ggml_visit_parents(struct ggml_cgraph * cgraph, struct ggml_tensor *
             /* unknown order, just fall back to using i*/ i;
         if (node->src[k]) {
             ggml_visit_parents(cgraph, node->src[k]);
+            node->src[k]->use_count++;
         }
     }
 

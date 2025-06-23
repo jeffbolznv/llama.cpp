@@ -817,8 +817,8 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
         }
         if (sched->debug > 1) {
             ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
-            GGML_LOG_DEBUG("node #%3d (%10.10s): %20.20s (%5.5s) [%5.5s %8.8s]:", i, ggml_op_name(node->op), node->name,
-                fmt_size(ggml_nbytes(node)), tensor_backend ? ggml_backend_name(tensor_backend) : "NULL", GET_CAUSE(node));
+            GGML_LOG_DEBUG("node #%3d (%10.10s): %20.20s (%5.5s) [%5.5s %8.8s] use=%d:", i, ggml_op_name(node->op), node->name,
+                fmt_size(ggml_nbytes(node)), tensor_backend ? ggml_backend_name(tensor_backend) : "NULL", GET_CAUSE(node), node->use_count);
             for (int j = 0; j < GGML_MAX_SRC; j++) {
                 struct ggml_tensor * src = node->src[j];
                 if (src == NULL) {
@@ -1562,10 +1562,98 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
     return true;
 }
 
+bool is_view_2d(ggml_tensor *view,
+                ggml_tensor *src,
+                int64_t     ne0,
+                int64_t     ne1,
+                size_t      nb1,
+                size_t      offset) {
+    if (view->op != GGML_OP_VIEW || view->view_src != src) {
+        return false;
+    }
+
+    if (view->nb[0] != src->nb[0] ||
+        view->nb[1] != nb1 ||
+        view->nb[2] != view->nb[1] * ne1 ||
+        view->nb[3] != view->nb[2]) {
+        return false;
+    }
+    if (view->ne[0] != ne0 ||
+        view->ne[1] != ne1 ||
+        view->ne[2] != 1 ||
+        view->ne[3] != 1) {
+        return false;
+    }
+    if (view->view_offs != view->view_src->view_offs + offset) {
+        return false;
+    }
+    return true;
+}
+
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
 
     ggml_backend_sched_split_graph(sched, graph);
+
+    for (int s = 0; s < sched->n_splits; s++) {
+        for (int i = sched->splits[s].graph.n_nodes - 1; i >= 0; i--) {
+            struct ggml_tensor * node = sched->splits[s].graph.nodes[i];
+
+            // peephole to find swiglu:
+            // x0 = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, split_point, cur->ne[1], cur->nb[1], 0));
+            // x1 = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, split_point, cur->ne[1], cur->nb[1], split_point * ggml_element_size(cur)));
+            // x0 = ggml_silu(ctx0, x0);
+            // ggml_mul(ctx0, x0, x1);
+            do {
+                if (node->op != GGML_OP_MUL) {
+                    break;
+                }
+                ggml_tensor * src0 = node->src[0];
+                ggml_tensor * src1 = node->src[1];
+                if (src0->op != GGML_OP_UNARY || ggml_get_op_params_i32(src0, 0) != GGML_UNARY_OP_SILU) {
+                    break;
+                }
+                src0 = src0->src[0];
+                if (src0->op != GGML_OP_CONT || src1->op != GGML_OP_CONT) {
+                    break;
+                }
+                if (src0->use_count != 1 || src1->use_count != 1) {
+                    break;
+                }
+                src0 = src0->src[0];
+                src1 = src1->src[0];
+
+                if (src0->use_count != 1 || src1->use_count != 1) {
+                    break;
+                }
+
+                ggml_tensor * input = src0->src[0];
+                if (!input || input->use_count != 2) {
+                    break;
+                }
+
+                uint32_t split_point = input->ne[0] / 2;
+
+                if (!is_view_2d(src0, input, split_point, input->ne[1], input->nb[1], 0)) {
+                    return false;
+                }
+                if (!is_view_2d(src1, input, split_point, input->ne[1], input->nb[1], split_point * ggml_element_size(input))) {
+                    return false;
+                }
+                //printf("detected swiglu\n");
+
+                node->src[0]->op = GGML_OP_NONE;
+                node->src[0]->src[0]->op = GGML_OP_NONE;
+                node->src[1]->op = GGML_OP_NONE;
+
+                node->op     = GGML_OP_GLU;
+                node->src[0] = input;
+                node->src[1] = NULL;
+                ggml_set_op_params_i32(node, 0, (int32_t) GGML_GLU_OP_SWIGLU);
+                ggml_set_op_params_i32(node, 1, (int32_t) false);
+            } while (0);
+        }
+    }
 
     if (!ggml_backend_sched_alloc_splits(sched)) {
         return false;

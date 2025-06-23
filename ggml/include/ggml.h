@@ -614,7 +614,11 @@ extern "C" {
 
         void * extra; // extra things e.g. for ggml-cuda.cu
 
-        char padding[8];
+        // number of operations that use this tensor as a src
+        int32_t use_count;
+
+        // add padding if needed to make a multiple of GGML_MEM_ALIGN
+        char padding[4];
     };
 
     static const size_t GGML_TENSOR_SIZE = sizeof(struct ggml_tensor);

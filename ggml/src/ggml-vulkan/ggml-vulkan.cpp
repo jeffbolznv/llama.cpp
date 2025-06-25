@@ -9698,15 +9698,14 @@ static bool ggml_vk_is_empty(ggml_tensor * node) {
 }
 
 // Returns true if nodes [i, i+1] are fusable RMS_NORM + MUL.
-bool ggml_can_fuse_rms_norm_mul(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int i) {
+static bool ggml_can_fuse_rms_norm_mul(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int i) {
     ggml_tensor *norm = cgraph->nodes[i];
 
-    if (norm->op != GGML_OP_RMS_NORM || norm->use_count != 1) {
+    if (norm->op != GGML_OP_RMS_NORM) {
         return false;
     }
-    // if norm is a view, some other node might be using the intermediate result
-    // view the view source.
-    if (norm->view_src) {
+
+    if (!ggml_can_fuse_node(norm, 1)) {
         return false;
     }
 
@@ -9721,7 +9720,6 @@ bool ggml_can_fuse_rms_norm_mul(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
     // Since norm is the first operand of mul, it must be the same shape
     GGML_ASSERT(ggml_are_same_shape(mul, norm));
 
-    // XXX TODO: Do we need a way to indicate that the user doesn't need the intermediate result?
     return true;
 }
 

@@ -1872,7 +1872,7 @@ struct test_rms_norm_mul : public test_case {
         }
     }
 
-    virtual double max_nmse_err() {
+    double max_nmse_err() override {
         return 1e-6;
     }
 

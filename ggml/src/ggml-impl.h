@@ -501,12 +501,12 @@ static inline bool ggml_node_has_N_uses(const struct ggml_tensor * node, int32_t
 // - all nodes are the same shape.
 // TODO: Consider allowing GGML_OP_NONE nodes in between
 static bool ggml_can_fuse(struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
-    size_t num_ops = ops.size();
+    int num_ops = (int)ops.size();
     if (node_idx + num_ops > cgraph->n_nodes) {
         return false;
     }
 
-    for (size_t i = 0; i < num_ops; ++i) {
+    for (int i = 0; i < num_ops; ++i) {
         struct ggml_tensor *node = cgraph->nodes[node_idx + i];
         if (node->op != ops.begin()[i]) {
             return false;

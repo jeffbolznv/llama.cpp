@@ -12,6 +12,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef __cplusplus
+#include <initializer_list>
+#endif
+
 #ifdef __ARM_FEATURE_SVE
 #include <arm_sve.h>
 #endif // __ARM_FEATURE_SVE
@@ -467,9 +471,10 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 #define GGML_FP32_TO_BF16(x) ggml_compute_fp32_to_bf16(x)
 #define GGML_BF16_TO_FP32(x) ggml_compute_bf16_to_fp32(x)
 
+#ifdef __cplusplus
 // return true if the node's results are only used by N other nodes
 // and can be fused into their calculations.
-static inline bool ggml_can_fuse_node(const struct ggml_tensor * node, int32_t N) {
+static inline bool ggml_node_has_N_uses(const struct ggml_tensor * node, int32_t N) {
     // check the use count against how many we're replacing
     if (node->use_count != N) {
         return false;
@@ -488,6 +493,40 @@ static inline bool ggml_can_fuse_node(const struct ggml_tensor * node, int32_t N
 
     return true;
 }
+
+// Returns true if nodes [i, i+ops.size()) are the sequence of ggml_ops in ops[]
+// and are fusable. Nodes are considered fusable according to this function if:
+// - all nodes except the last have only one use and are not views/outputs (see ggml_node_has_N_uses).
+// - all nodes except the last are src[0] of the following node.
+// - all nodes are the same shape.
+// TODO: Consider allowing GGML_OP_NONE nodes in between
+static bool ggml_can_fuse(struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
+    size_t num_ops = ops.size();
+    if (node_idx + num_ops > cgraph->n_nodes) {
+        return false;
+    }
+
+    for (size_t i = 0; i < num_ops; ++i) {
+        struct ggml_tensor *node = cgraph->nodes[node_idx + i];
+        if (node->op != ops.begin()[i]) {
+            return false;
+        }
+        if (i < num_ops && !ggml_node_has_N_uses(node, 1)) {
+            return false;
+        }
+        if (i > 0) {
+            struct ggml_tensor *prev = cgraph->nodes[node_idx + i - 1];
+            if (node->src[0] != prev) {
+                return false;
+            }
+            if (!ggml_are_same_shape(node, prev)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif
 
 #ifdef __cplusplus
 }

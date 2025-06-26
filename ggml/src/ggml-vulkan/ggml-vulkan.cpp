@@ -9697,32 +9697,6 @@ static bool ggml_vk_is_empty(ggml_tensor * node) {
     return ggml_is_empty(node) || node->op == GGML_OP_NONE || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE;
 }
 
-// Returns true if nodes [i, i+1] are fusable RMS_NORM + MUL.
-static bool ggml_can_fuse_rms_norm_mul(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int i) {
-    ggml_tensor *norm = cgraph->nodes[i];
-
-    if (norm->op != GGML_OP_RMS_NORM) {
-        return false;
-    }
-
-    if (!ggml_can_fuse_node(norm, 1)) {
-        return false;
-    }
-
-    if (i + 1 >= cgraph->n_nodes) {
-        return false;
-    }
-    ggml_tensor *mul = cgraph->nodes[i + 1];
-    if (mul->op != GGML_OP_MUL || mul->src[0] != norm) {
-        return false;
-    }
-
-    // Since norm is the first operand of mul, it must be the same shape
-    GGML_ASSERT(ggml_are_same_shape(mul, norm));
-
-    return true;
-}
-
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
@@ -9736,7 +9710,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
     uint64_t total_mat_mul_bytes = 0;
     for (int i = 0; i < cgraph->n_nodes; i++) {
-        if (ggml_can_fuse_rms_norm_mul(ctx, cgraph, i)) {
+        if (ggml_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             ctx->num_additional_fused_ops = 1;
         }
         ggml_vk_build_graph(ctx, cgraph, cgraph->nodes[i], i, nullptr, 0, true, false, false, false);
@@ -9806,7 +9780,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             mul_mat_bytes += ggml_nbytes(cgraph->nodes[i]->src[0]);
         }
 
-        if (ggml_can_fuse_rms_norm_mul(ctx, cgraph, i)) {
+        if (ggml_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             ctx->num_additional_fused_ops = 1;
         }
 

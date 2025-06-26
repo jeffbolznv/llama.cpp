@@ -12,10 +12,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#ifdef __cplusplus
-#include <initializer_list>
-#endif
-
 #ifdef __ARM_FEATURE_SVE
 #include <arm_sve.h>
 #endif // __ARM_FEATURE_SVE
@@ -471,7 +467,6 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 #define GGML_FP32_TO_BF16(x) ggml_compute_fp32_to_bf16(x)
 #define GGML_BF16_TO_FP32(x) ggml_compute_bf16_to_fp32(x)
 
-#ifdef __cplusplus
 // return true if the node's results are only used by N other nodes
 // and can be fused into their calculations.
 static inline bool ggml_node_has_N_uses(const struct ggml_tensor * node, int32_t N) {
@@ -500,15 +495,14 @@ static inline bool ggml_node_has_N_uses(const struct ggml_tensor * node, int32_t
 // - all nodes except the last are src[0] of the following node.
 // - all nodes are the same shape.
 // TODO: Consider allowing GGML_OP_NONE nodes in between
-static bool ggml_can_fuse(struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
-    int num_ops = (int)ops.size();
+static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, const enum ggml_op *ops, int num_ops) {
     if (node_idx + num_ops > cgraph->n_nodes) {
         return false;
     }
 
     for (int i = 0; i < num_ops; ++i) {
         struct ggml_tensor *node = cgraph->nodes[node_idx + i];
-        if (node->op != ops.begin()[i]) {
+        if (node->op != ops[i]) {
             return false;
         }
         if (i < num_ops && !ggml_node_has_N_uses(node, 1)) {
@@ -526,9 +520,17 @@ static bool ggml_can_fuse(struct ggml_cgraph * cgraph, int node_idx, std::initia
     }
     return true;
 }
+
+#ifdef __cplusplus
+}
 #endif
 
 #ifdef __cplusplus
+#include <initializer_list>
+
+// nicer C++ syntax for ggml_can_fuse
+inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
+    return ggml_can_fuse(cgraph, node_idx, ops.begin(), (int)ops.size());
 }
 #endif
 

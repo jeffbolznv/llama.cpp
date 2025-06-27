@@ -302,6 +302,7 @@ struct ggml_cgraph {
     struct ggml_tensor ** grad_accs; // accumulators for node gradients
     struct ggml_tensor ** leafs;     // tensors with constant data
     int32_t             * use_counts;// number of uses of each tensor
+    int32_t             * hash_to_node;// map hash index to node index
 
     struct ggml_hash_set visited_hash_set;
 

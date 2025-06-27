@@ -301,6 +301,7 @@ struct ggml_cgraph {
     struct ggml_tensor ** grads;     // the outputs of these tensors are the gradients of the nodes
     struct ggml_tensor ** grad_accs; // accumulators for node gradients
     struct ggml_tensor ** leafs;     // tensors with constant data
+    int32_t             * use_counts;// number of uses of each tensor
 
     struct ggml_hash_set visited_hash_set;
 
@@ -469,9 +470,10 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 
 // return true if the node's results are only used by N other nodes
 // and can be fused into their calculations.
-static inline bool ggml_node_has_N_uses(const struct ggml_tensor * node, int32_t N) {
+static inline bool ggml_node_has_N_uses(const struct ggml_cgraph * cgraph, int node_idx, int32_t N) {
+    const struct ggml_tensor * node = cgraph->nodes[node_idx];
     // check the use count against how many we're replacing
-    if (node->use_count != N) {
+    if (cgraph->use_counts[node_idx] != N) {
         return false;
     }
 
@@ -505,7 +507,7 @@ static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx
         if (node->op != ops[i]) {
             return false;
         }
-        if (i < num_ops && !ggml_node_has_N_uses(node, 1)) {
+        if (i < num_ops && !ggml_node_has_N_uses(cgraph, node_idx + i, 1)) {
             return false;
         }
         if (i > 0) {

@@ -1608,7 +1608,6 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.data         =*/ obj_alloc_size > 0 ? (void *)(result + 1) : data,
         /*.name         =*/ { 0 },
         /*.extra        =*/ NULL,
-        /*.use_count    =*/ 0,
         /*.padding      =*/ { 0 },
     };
 
@@ -5816,9 +5815,31 @@ static void ggml_visit_parents(struct ggml_cgraph * cgraph, struct ggml_tensor *
             (cgraph->order == GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT) ? i :
             (cgraph->order == GGML_CGRAPH_EVAL_ORDER_RIGHT_TO_LEFT) ? (GGML_MAX_SRC-1-i) :
             /* unknown order, just fall back to using i*/ i;
-        if (node->src[k]) {
-            ggml_visit_parents(cgraph, node->src[k]);
-            node->src[k]->use_count++;
+
+        struct ggml_tensor * s = node->src[k];
+        if (s) {
+            ggml_visit_parents(cgraph, s);
+
+            // Update the use count for this operand.
+            // Skip if it's a leaf node
+            if (!(s->op == GGML_OP_NONE && !(s->flags & GGML_TENSOR_FLAG_PARAM))) {
+                // the src can be the node itself (happens in ggml_cast)
+                if (s == node) {
+                    cgraph->use_counts[cgraph->n_nodes]++;
+                } else {
+                    // Search backward to find the src. This usually takes very few
+                    // (most often one) iteration(s). Probably comparable to hashing
+                    // on average..
+                    int j = cgraph->n_nodes - 1;
+                    for (; j >= 0; --j) {
+                        if (s == cgraph->nodes[j]) {
+                            break;
+                        }
+                    }
+                    GGML_ASSERT(j >= 0);
+                    cgraph->use_counts[j]++;
+                }
+            }
         }
     }
 
@@ -5979,6 +6000,7 @@ static size_t ggml_graph_nbytes(size_t size, bool grads) {
     incr_ptr_aligned(&p, sizeof(struct ggml_cgraph), 1);
     incr_ptr_aligned(&p, size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)); // nodes
     incr_ptr_aligned(&p, size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)); // leafs
+    incr_ptr_aligned(&p, size * sizeof(int32_t), sizeof(int32_t)); // use_counts
     incr_ptr_aligned(&p, hash_size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)); // hash keys
     if (grads) {
         incr_ptr_aligned(&p, hash_size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)); // grads
@@ -6010,6 +6032,7 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
 
     struct ggml_tensor ** nodes_ptr     =         incr_ptr_aligned(&p, size      * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *));
     struct ggml_tensor ** leafs_ptr     =         incr_ptr_aligned(&p, size      * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *));
+    int32_t             * use_counts_ptr=         incr_ptr_aligned(&p, size      * sizeof(int32_t), sizeof(int32_t));
     struct ggml_tensor ** hash_keys_ptr =         incr_ptr_aligned(&p, hash_size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *));
     struct ggml_tensor ** grads_ptr     = grads ? incr_ptr_aligned(&p, hash_size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)) : NULL;
     struct ggml_tensor ** grad_accs_ptr = grads ? incr_ptr_aligned(&p, hash_size * sizeof(struct ggml_tensor *), sizeof(struct ggml_tensor *)) : NULL;
@@ -6027,6 +6050,7 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
         /*.grads        =*/ grads_ptr,
         /*.grad_accs    =*/ grad_accs_ptr,
         /*.leafs        =*/ leafs_ptr,
+        /*.use_counts   =*/ use_counts_ptr,
         /*.hash_table   =*/ { hash_size, hash_used, hash_keys_ptr },
         /*.order        =*/ GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT,
     };
@@ -6036,6 +6060,7 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
         memset(cgraph->grads,     0, hash_size*sizeof(struct ggml_tensor *));
         memset(cgraph->grad_accs, 0, hash_size*sizeof(struct ggml_tensor *));
     }
+    memset(cgraph->use_counts,    0, size*sizeof(int32_t));
 
     return cgraph;
 }
@@ -6053,6 +6078,7 @@ struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph0, int i0, int i1)
         /*.grads            =*/ NULL, // gradients would need visited_hash_set
         /*.grad_accs        =*/ NULL,
         /*.leafs            =*/ NULL,
+        /*.use_counts       =*/ cgraph0->use_counts + i0,
         /*.visited_hash_set =*/ { 0, NULL, NULL },
         /*.order            =*/ cgraph0->order,
     };

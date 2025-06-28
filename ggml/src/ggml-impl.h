@@ -470,10 +470,12 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 
 // return true if the node's results are only used by N other nodes
 // and can be fused into their calculations.
-static inline bool ggml_node_has_N_uses(const struct ggml_cgraph * cgraph, int node_idx, int32_t N) {
+static inline bool ggml_node_has_n_uses(const struct ggml_cgraph * cgraph, int node_idx, int32_t n_uses) {
     const struct ggml_tensor * node = cgraph->nodes[node_idx];
+
     // check the use count against how many we're replacing
-    if (cgraph->use_counts[ggml_hash_find(&cgraph->visited_hash_set, node)] != N) {
+    size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, node);
+    if (!ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos) || cgraph->use_counts[hash_pos] != n_uses) {
         return false;
     }
 
@@ -494,25 +496,25 @@ static inline bool ggml_node_has_N_uses(const struct ggml_cgraph * cgraph, int n
 // Returns true if nodes [i, i+ops.size()) are the sequence of ggml_ops in ops[]
 // and are fusable. Nodes are considered fusable according to this function if:
 // - all nodes except the last have only one use and are not views/outputs (see ggml_node_has_N_uses).
-// - all nodes except the last are src[0] of the following node.
+// - all nodes except the last are a src of the following node.
 // - all nodes are the same shape.
 // TODO: Consider allowing GGML_OP_NONE nodes in between
-static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, const enum ggml_op *ops, int num_ops) {
+static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, const enum ggml_op * ops, int num_ops) {
     if (node_idx + num_ops > cgraph->n_nodes) {
         return false;
     }
 
     for (int i = 0; i < num_ops; ++i) {
-        struct ggml_tensor *node = cgraph->nodes[node_idx + i];
+        struct ggml_tensor * node = cgraph->nodes[node_idx + i];
         if (node->op != ops[i]) {
             return false;
         }
-        if (i < num_ops && !ggml_node_has_N_uses(cgraph, node_idx + i, 1)) {
+        if (!ggml_node_has_n_uses(cgraph, node_idx + i, 1)) {
             return false;
         }
         if (i > 0) {
-            struct ggml_tensor *prev = cgraph->nodes[node_idx + i - 1];
-            if (node->src[0] != prev) {
+            struct ggml_tensor * prev = cgraph->nodes[node_idx + i - 1];
+            if (node->src[0] != prev && node->src[1] != prev) {
                 return false;
             }
             if (!ggml_are_same_shape(node, prev)) {
@@ -529,15 +531,12 @@ static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx
 
 #ifdef __cplusplus
 #include <initializer_list>
+#include <vector>
 
 // nicer C++ syntax for ggml_can_fuse
 inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
     return ggml_can_fuse(cgraph, node_idx, ops.begin(), (int)ops.size());
 }
-#endif
-
-#ifdef __cplusplus
-#include <vector>
 
 // expose GGUF internals for test code
 GGML_API size_t gguf_type_size(enum gguf_type type);

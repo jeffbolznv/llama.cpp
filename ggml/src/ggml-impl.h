@@ -509,7 +509,7 @@ static inline bool ggml_can_fuse(const struct ggml_cgraph * cgraph, int node_idx
         if (node->op != ops[i]) {
             return false;
         }
-        if (!ggml_node_has_n_uses(cgraph, node_idx + i, 1)) {
+        if (i < num_ops - 1 && !ggml_node_has_n_uses(cgraph, node_idx + i, 1)) {
             return false;
         }
         if (i > 0) {

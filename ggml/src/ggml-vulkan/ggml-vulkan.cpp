@@ -982,7 +982,7 @@ struct ggml_backend_vk_context {
 
     // number of additional consecutive nodes that are being fused with the
     // node currently being processed
-    bool num_additional_fused_ops {};
+    uint32_t num_additional_fused_ops {};
 };
 
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
@@ -8972,7 +8972,8 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         if (ctx->num_additional_fused_ops > 0) {
             // fused rms_norm + mul
             ggml_tensor *mul = cgraph->nodes[node_idx + 1];
-            ggml_vk_rms_norm(ctx, compute_ctx, src0, mul->src[1], mul, dryrun);
+            ggml_tensor *other_src = mul->src[0] == node ? mul->src[1] : mul->src[0];
+            ggml_vk_rms_norm(ctx, compute_ctx, src0, other_src, mul, dryrun);
         } else {
             ggml_vk_rms_norm(ctx, compute_ctx, src0, src0, node, dryrun);
         }

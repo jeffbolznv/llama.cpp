@@ -6120,7 +6120,7 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
     }
 
     if (N == 1 && qk_ratio > 1 && qk_ratio <= max_gqa &&
-        qk_ratio * nek2 == neq2 && nek2 == nev2 && neq3 == 1 && nek3 == 1 && nev3 == 1 && nem2 == 1 && nem3 == 1) {
+        qk_ratio * nek2 == neq2 && nek2 == nev2 && neq3 == 1 && nek3 == 1 && nev3 == 1 && nem2 <= 1 && nem3 <= 1) {
         // grouped query attention - make the N dimension equal to gqa_ratio, reduce
         // workgroups proportionally in y dimension. The shader will detect gqa_ratio > 1
         // and change addressing calculations to index Q's dimension 2.

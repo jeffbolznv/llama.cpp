@@ -6252,13 +6252,13 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
     const uint32_t shader_core_count = ctx->device->shader_core_count ? ctx->device->shader_core_count : 16;
 
     // Try to use split_k when KV is large enough to be worth the overhead
-    if (workgroups_x == 1 && shader_core_count > 0 && KV >= 512) {
+    if (workgroups_x == 1 && shader_core_count > 0) {
         // Try to run two workgroups per SM.
         split_k = shader_core_count * 2 / (workgroups_y * workgroups_z);
         if (split_k > 1) {
             // Try to evenly split KV into split_k chunks, but it needs to be a multiple
             // of "align", so recompute split_k based on that.
-            split_kv = ROUNDUP_POW2(KV / split_k, pipelines[1]->align);
+            split_kv = ROUNDUP_POW2(std::max(1u, KV / split_k), pipelines[1]->align);
             split_k = CEIL_DIV(KV, split_kv);
             workgroups_x = split_k;
         }

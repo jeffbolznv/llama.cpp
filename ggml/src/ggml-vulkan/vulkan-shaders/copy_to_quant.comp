@@ -7,7 +7,13 @@ spirv_execution_mode(capabilities = [4467], 4462, 16); // RoundingModeRTE, 16 bi
 
 #include "types.comp"
 
+#if defined(SET_ROWS) && QUANT_K == 1
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+const uint BLOCK_SIZE = 512;
+#else
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+const uint BLOCK_SIZE = 32;
+#endif
 
 layout (binding = 0) readonly buffer S {float data_s[];};
 
@@ -244,7 +250,7 @@ void main() {
     init_iq_shmem(gl_WorkGroupSize);
 #endif
 
-    const uint idx = (gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x * 32 + gl_LocalInvocationID.x) * QUANT_K;
+    const uint idx = ((gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x) * BLOCK_SIZE + gl_LocalInvocationID.x) * QUANT_K;
 
     if (idx >= p.ne) {
         return;
@@ -253,8 +259,8 @@ void main() {
     uint i00, i01, i02, i03;
     get_indices(idx, i00, i01, i02, i03);
 
-    uint i12 = i03 % p.ne12;
-    uint i11 = i02 % p.ne11;
+    uint i12 = fastmod(i03, p.ne12);
+    uint i11 = fastmod(i02, p.ne11);
     uint i10 = i01;
 
     uint i1 = data_i[src1_idx(i10, i11, i12, 0) + get_boffset()].x;

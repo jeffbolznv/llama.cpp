@@ -908,7 +908,21 @@ struct vk_op_conv2d_push_constants {
     uint32_t nb1;
     uint32_t nb2;
     uint32_t nb3;
+
+    // init_fastdiv_values constants for dividing by KW, KW*KH, OW, OW*OH
+    uint32_t KWmp;   uint32_t KWL;
+    uint32_t KWKHmp; uint32_t KWKHL;
+    uint32_t OWmp;   uint32_t OWL;
+    uint32_t OWOHmp; uint32_t OWOHL;
 };
+
+template <> void init_pushconst_fastdiv(vk_op_conv2d_push_constants &p) {
+    // Compute magic values to divide by KW, KW*KH, OW, OW*OH
+    init_fastdiv_values(p.KW,       p.KWmp,    p.KWL);
+    init_fastdiv_values(p.KW*p.KH,  p.KWKHmp,  p.KWKHL);
+    init_fastdiv_values(p.OW,       p.OWmp,    p.OWL);
+    init_fastdiv_values(p.OW*p.OH,  p.OWOHmp,  p.OWOHL);
+}
 
 struct vk_op_conv2d_dw_push_constants {
     uint32_t ne;
@@ -3052,17 +3066,28 @@ static void ggml_vk_load_shaders(vk_device& device) {
     uint32_t conv2d_BS_K     = 128;
     uint32_t conv2d_BS_CRS   = 16;
     uint32_t use_collectives = 0;  // Enables subgroup ops for preventing the re-calculation of indices.
+    uint32_t conv2d_BS_NPQ = 128;
+    uint32_t conv2d_TS_K   = 8;
+    uint32_t conv2d_SHMEM_PAD = 4;
+
+    if (device->vendor_id == VK_VENDOR_ID_NVIDIA) {
+        conv2d_BS_K     = 64;
+        conv2d_BS_CRS   = 32;
+        conv2d_BS_NPQ   = 32;
+        conv2d_TS_K     = 4;
+    }
+
     if (device->subgroup_shuffle &&
-        device->vendor_id != VK_VENDOR_ID_INTEL) {  // Do not enable collectives on Intel, see PR 14316
+        device->vendor_id != VK_VENDOR_ID_INTEL &&   // Do not enable collectives on Intel, see PR 14316.
+        device->vendor_id != VK_VENDOR_ID_NVIDIA) {  // Collectives no faster on NVIDIA.
         use_collectives = 1;
         conv2d_BS_CRS   = std::min(
             device->subgroup_size,
-            conv2d_BS_CRS);  // CRS block size should be capped at sugroup size for correctness when shuffle is used.
+            conv2d_BS_CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
     }
-    uint32_t conv2d_BS_NPQ = 128;
-    uint32_t conv2d_TS_K   = 8;
+
     uint32_t conv2d_shmem_req =
-        (conv2d_BS_K * (conv2d_BS_CRS + 1) + conv2d_BS_CRS * (conv2d_BS_NPQ + 1)) * sizeof(float);
+        (conv2d_BS_K * (conv2d_BS_CRS + conv2d_SHMEM_PAD) + conv2d_BS_CRS * (conv2d_BS_NPQ + conv2d_SHMEM_PAD)) * sizeof(float);
     if (device->properties.limits.maxComputeSharedMemorySize < conv2d_shmem_req) {
         conv2d_BS_CRS = 8;
         if (use_collectives) {

@@ -319,6 +319,13 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& 
     return vk_device_architecture::OTHER;
 }
 
+enum vk_conv_shapes {
+    CONV_SHAPE_128x128,
+    CONV_SHAPE_64x32,
+    CONV_SHAPE_32x256,
+    CONV_SHAPE_COUNT,
+};
+
 struct vk_device_struct {
     std::recursive_mutex mutex;
 
@@ -483,8 +490,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_rwkv_wkv6_f32;
     vk_pipeline pipeline_rwkv_wkv7_f32;
     vk_pipeline pipeline_opt_step_adamw_f32;
-    vk_pipeline pipeline_conv2d_f32;
-    vk_pipeline pipeline_conv2d_f16_f32;
+    vk_pipeline pipeline_conv2d_f32[CONV_SHAPE_COUNT];
+    vk_pipeline pipeline_conv2d_f16_f32[CONV_SHAPE_COUNT];
     vk_pipeline pipeline_conv2d_dw_whcn_f32;
     vk_pipeline pipeline_conv2d_dw_cwhn_f32;
 
@@ -3062,59 +3069,61 @@ static void ggml_vk_load_shaders(vk_device& device) {
     ggml_vk_create_pipeline(device, device->pipeline_opt_step_adamw_f32, "opt_step_adamw_f32", opt_step_adamw_f32_len, opt_step_adamw_f32_data, "main", 5, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
 
     // conv2d
-    uint32_t conv2d_WG_SIZE  = 256;
-    uint32_t conv2d_BS_K     = 128;
-    uint32_t conv2d_BS_CRS   = 16;
-    uint32_t use_collectives = 0;  // Enables subgroup ops for preventing the re-calculation of indices.
-    uint32_t conv2d_BS_NPQ = 128;
-    uint32_t conv2d_TS_K   = 8;
-    uint32_t conv2d_SHMEM_PAD = 4;
+    for (uint32_t s = 0; s < CONV_SHAPE_COUNT; ++s) {
+        uint32_t conv2d_WG_SIZE  = 256;
+        uint32_t conv2d_BS_K     = 128;
+        uint32_t conv2d_BS_CRS   = 16;
+        uint32_t use_collectives = 0;  // Enables subgroup ops for preventing the re-calculation of indices.
+        uint32_t conv2d_BS_NPQ = 128;
+        uint32_t conv2d_TS_K   = 8;
+        uint32_t conv2d_SHMEM_PAD = 4;
 
-    if (device->vendor_id == VK_VENDOR_ID_NVIDIA) {
-        conv2d_BS_K     = 64;
-        conv2d_BS_CRS   = 32;
-        conv2d_BS_NPQ   = 32;
-        conv2d_TS_K     = 4;
-    }
-
-    if (device->subgroup_shuffle &&
-        device->vendor_id != VK_VENDOR_ID_INTEL &&   // Do not enable collectives on Intel, see PR 14316.
-        device->vendor_id != VK_VENDOR_ID_NVIDIA) {  // Collectives no faster on NVIDIA.
-        use_collectives = 1;
-        conv2d_BS_CRS   = std::min(
-            device->subgroup_size,
-            conv2d_BS_CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
-    }
-
-    uint32_t conv2d_shmem_req =
-        (conv2d_BS_K * (conv2d_BS_CRS + conv2d_SHMEM_PAD) + conv2d_BS_CRS * (conv2d_BS_NPQ + conv2d_SHMEM_PAD)) * sizeof(float);
-    if (device->properties.limits.maxComputeSharedMemorySize < conv2d_shmem_req) {
-        conv2d_BS_CRS = 8;
-        if (use_collectives) {
-            conv2d_BS_CRS = std::min(device->subgroup_size, conv2d_BS_CRS);
+        switch (s) {
+        default:
+        case CONV_SHAPE_128x128:
+            conv2d_BS_K = 128;
+            conv2d_BS_NPQ = 128;
+            conv2d_BS_CRS = 16;
+            break;
+        case CONV_SHAPE_64x32:
+            conv2d_BS_K = 64;
+            conv2d_BS_NPQ = 32;
+            conv2d_BS_CRS = 32;
+            conv2d_TS_K   = 4;
+            break;
+        case CONV_SHAPE_32x256:
+            conv2d_BS_K = 32;
+            conv2d_BS_NPQ = 256;
+            conv2d_BS_CRS = 16;
+            break;
         }
-    }
 
-    if (use_collectives) {
+        if (device->subgroup_shuffle &&
+            device->vendor_id != VK_VENDOR_ID_INTEL &&   // Do not enable collectives on Intel, see PR 14316.
+            device->vendor_id != VK_VENDOR_ID_NVIDIA) {  // Collectives no faster on NVIDIA.
+            use_collectives = 1;
+            conv2d_BS_CRS   = std::min(
+                device->subgroup_size,
+                conv2d_BS_CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
+        }
+
+        uint32_t conv2d_shmem_req =
+            (conv2d_BS_K * (conv2d_BS_CRS + conv2d_SHMEM_PAD) + conv2d_BS_CRS * (conv2d_BS_NPQ + conv2d_SHMEM_PAD)) * sizeof(float);
+        if (device->properties.limits.maxComputeSharedMemorySize < conv2d_shmem_req) {
+            conv2d_BS_CRS = 8;
+            if (use_collectives) {
+                conv2d_BS_CRS = std::min(device->subgroup_size, conv2d_BS_CRS);
+            }
+        }
+
         ggml_vk_create_pipeline(
-            device, device->pipeline_conv2d_f32, "conv2d_f32", conv2d_f32_len, conv2d_f32_data, "main", 3,
+            device, device->pipeline_conv2d_f32[s], "conv2d_f32", conv2d_f32_len, conv2d_f32_data, "main", 3,
             sizeof(vk_op_conv2d_push_constants), { conv2d_BS_K, conv2d_BS_NPQ, 1 },
-            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true, true);
+            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true, use_collectives);
         ggml_vk_create_pipeline(
-            device, device->pipeline_conv2d_f16_f32, "conv2d_f16_f32", conv2d_f16_f32_len, conv2d_f16_f32_data, "main", 3,
+            device, device->pipeline_conv2d_f16_f32[s], "conv2d_f16_f32", conv2d_f16_f32_len, conv2d_f16_f32_data, "main", 3,
             sizeof(vk_op_conv2d_push_constants), { conv2d_BS_K, conv2d_BS_NPQ, 1 },
-            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true, true);
-    } else {
-        ggml_vk_create_pipeline(
-            device, device->pipeline_conv2d_f32, "conv2d_f32", conv2d_f32_len, conv2d_f32_data, "main", 3,
-            sizeof(vk_op_conv2d_push_constants), { conv2d_BS_K, conv2d_BS_NPQ, 1 },
-            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true,
-            false);
-        ggml_vk_create_pipeline(
-            device, device->pipeline_conv2d_f16_f32, "conv2d_f16_f32", conv2d_f16_f32_len, conv2d_f16_f32_data, "main", 3,
-            sizeof(vk_op_conv2d_push_constants), { conv2d_BS_K, conv2d_BS_NPQ, 1 },
-            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true,
-            false);
+            { conv2d_WG_SIZE, conv2d_BS_K, conv2d_BS_CRS, conv2d_BS_NPQ, conv2d_TS_K, use_collectives }, 1, true, use_collectives);
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_conv2d_dw_whcn_f32, "conv2d_dw_whcn_f32", conv2d_dw_whcn_f32_len, conv2d_dw_whcn_f32_data, "main", 3, sizeof(vk_op_conv2d_dw_push_constants), {512, 1, 1}, {}, 1);
@@ -6666,6 +6675,34 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
     }
 }
 
+static std::array<uint32_t, 3> ggml_vk_get_conv_elements(const ggml_tensor *dst) {
+    const ggml_tensor *src0 = dst->src[0];
+    const ggml_tensor *src1 = dst->src[1];
+
+    // src0 - kernel:   [KW, KH, Cin, Cout]
+    // src1 - input:    [W, H, Cin, N]
+    // dst - result:    [OW, OH, Cout, N]
+
+    // Copied from ggml.c: int64_t ggml_calc_conv_output_size(int64_t ins, int64_t ks, int s, int p, int d)
+    auto calc_conv_output_size = [](int64_t ins, int64_t ks, int s, int p, int d) -> int64_t {
+        return (ins + 2 * p - d * (ks - 1) - 1) / s + 1;
+    };
+    // parallelize in {OW/BS_K, OH/BS_NPQ, 1}
+    int64_t W    = src1->ne[0];
+    int64_t H    = src1->ne[1];
+    int64_t KW   = src0->ne[0];
+    int64_t KH   = src0->ne[1];
+    int64_t Cout = src0->ne[3];
+    int64_t N    = src1->ne[3];
+    int64_t OH   = calc_conv_output_size(H, KH, dst->op_params[1], dst->op_params[3], dst->op_params[5]);
+    int64_t OW   = calc_conv_output_size(W, KW, dst->op_params[0], dst->op_params[2], dst->op_params[4]);
+    int64_t NPQ  = N * OW * OH;
+
+    // Tile output matrix to (K/NB_K, NPQ/NB_NPQ, 1) workgroups
+    std::array<uint32_t, 3> elements = { static_cast<uint32_t>(Cout), static_cast<uint32_t>(NPQ), 1 };
+    return elements;
+}
+
 static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, ggml_tensor * dst, ggml_op op) {
     switch (op) {
     case GGML_OP_GET_ROWS:
@@ -6995,10 +7032,25 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
     case GGML_OP_CONV_2D:
         if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
             ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
+            auto elements = ggml_vk_get_conv_elements(dst);
+            vk_conv_shapes shape;
+
+            uint32_t tiles[CONV_SHAPE_COUNT];
+            for (uint32_t i = 0; i < CONV_SHAPE_COUNT; ++i) {
+                tiles[i] = CEIL_DIV(elements[0], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[0]) * CEIL_DIV(elements[1], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[1]);
+            }
+            if (elements[0] > 64 && tiles[CONV_SHAPE_128x128] >= ctx->device->shader_core_count * 2) {
+                shape = CONV_SHAPE_128x128;
+            } else if (elements[0] <= 32 && tiles[CONV_SHAPE_32x256] >= ctx->device->shader_core_count * 2) {
+                shape = CONV_SHAPE_32x256;
+            } else {
+                shape = CONV_SHAPE_64x32;
+            }
+
             if (src0->type == GGML_TYPE_F32) {
-                return ctx->device->pipeline_conv2d_f32;
+                return ctx->device->pipeline_conv2d_f32[shape];
             } else if (src0->type == GGML_TYPE_F16) {
-                return ctx->device->pipeline_conv2d_f16_f32;
+                return ctx->device->pipeline_conv2d_f16_f32[shape];
             }
         }
         return nullptr;
@@ -7326,29 +7378,8 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         } break;
     case GGML_OP_CONV_2D:
         {
-            // src0 - kernel:   [KW, KH, Cin, Cout]
-            // src1 - input:    [W, H, Cin, N]
-            // dst - result:    [OW, OH, Cout, N]
-
-            // Copied from ggml.c: int64_t ggml_calc_conv_output_size(int64_t ins, int64_t ks, int s, int p, int d)
-            auto calc_conv_output_size = [](int64_t ins, int64_t ks, int s, int p, int d) -> int64_t {
-                return (ins + 2 * p - d * (ks - 1) - 1) / s + 1;
-            };
-            // parallelize in {OW/BS_K, OH/BS_NPQ, 1}
-            int64_t W    = src1->ne[0];
-            int64_t H    = src1->ne[1];
-            int64_t KW   = src0->ne[0];
-            int64_t KH   = src0->ne[1];
-            int64_t Cout = src0->ne[3];
-            int64_t N    = src1->ne[3];
-            int64_t OH   = calc_conv_output_size(H, KH, dst->op_params[1], dst->op_params[3], dst->op_params[5]);
-            int64_t OW   = calc_conv_output_size(W, KW, dst->op_params[0], dst->op_params[2], dst->op_params[4]);
-            int64_t NPQ  = N * OW * OH;
-
-            // Tile output matrix to (K/NB_K, NPQ/NB_NPQ, 1) workgroups
-            elements = { static_cast<uint32_t>(Cout), static_cast<uint32_t>(NPQ), 1 };
-        }
-        break;
+            elements = ggml_vk_get_conv_elements(dst);
+        } break;
     case GGML_OP_ADD:
     case GGML_OP_SUB:
     case GGML_OP_DIV:

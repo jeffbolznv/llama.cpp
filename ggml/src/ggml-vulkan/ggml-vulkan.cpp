@@ -222,6 +222,7 @@ enum vk_device_architecture {
     AMD_RDNA2,
     AMD_RDNA3,
     INTEL_XE2,
+    NVIDIA_PRE_TURING,
 };
 
 // HSK x HSV
@@ -314,6 +315,22 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& 
             // https://www.intel.com/content/www/us/en/content-details/824434/2024-intel-tech-tour-xe2-and-lunar-lake-s-gpu.html
             // https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2025-0/intel-xe-gpu-architecture.html
             return vk_device_architecture::INTEL_XE2;
+        }
+    } else if (props.vendorID == VK_VENDOR_ID_NVIDIA) {
+        const std::vector<vk::ExtensionProperties> ext_props = device.enumerateDeviceExtensionProperties();
+
+        bool cooperative_matrix = false;
+
+        // Detect "pre-turing" based on lack of coopmat support.
+        for (const auto& properties : ext_props) {
+            if (strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0) {
+                cooperative_matrix = true;
+                break;
+            }
+        }
+
+        if (!cooperative_matrix) {
+            return vk_device_architecture::NVIDIA_PRE_TURING;
         }
     }
     return vk_device_architecture::OTHER;
@@ -3098,9 +3115,13 @@ static void ggml_vk_load_shaders(vk_device& device) {
             break;
         }
 
+        // Use collectives on pre-Turing NVIDIA GPUs, which had slower integer math.
+        bool allow_collectives_nv = device->vendor_id != VK_VENDOR_ID_NVIDIA ||
+                                    device->architecture == vk_device_architecture::NVIDIA_PRE_TURING;
+
         if (device->subgroup_shuffle &&
             device->vendor_id != VK_VENDOR_ID_INTEL &&   // Do not enable collectives on Intel, see PR 14316.
-            device->vendor_id != VK_VENDOR_ID_NVIDIA) {  // Collectives no faster on NVIDIA.
+            allow_collectives_nv) {
             use_collectives = 1;
             conv2d_BS_CRS   = std::min(
                 device->subgroup_size,

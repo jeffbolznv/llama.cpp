@@ -202,7 +202,7 @@ void main() {
             Ash[B_ly * Ash_stride + B_lx] = val;
         }
         /* Load input to B_block: (BS_CRS x BS_NPQ) */
-        [[unroll]] for (uint32_t r_offset = 0; r_offset < BS_CRS; r_offset += BrpWg) {
+        UNROLL for (uint32_t r_offset = 0; r_offset < BS_CRS; r_offset += BrpWg) {
             uint32_t B_ly          = r_offset + Br;             /* Row index of B block */
             uint32_t B_lx          = Bc;
             uint32_t NPQ_idx       = B_idx_NPQ * BS_NPQ + B_lx; /* Global NPQ index (column index of B) */
@@ -248,7 +248,7 @@ void main() {
         }
         barrier();
         if (T_y * TS_K < K) {
-            [[unroll]] for (uint32_t CRS_lidx = 0; CRS_lidx < BS_CRS; CRS_lidx++) {
+            UNROLL for (uint32_t CRS_lidx = 0; CRS_lidx < BS_CRS; CRS_lidx++) {
                 for (uint32_t T_ly = 0; T_ly < TS_K; T_ly++) {
                     regA[T_ly] = Ash[(T_y * TS_K + T_ly) * Ash_stride + CRS_lidx];
                 }

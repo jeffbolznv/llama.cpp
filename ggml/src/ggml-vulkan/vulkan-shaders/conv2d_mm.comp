@@ -8,9 +8,6 @@
 
 #include "types.comp"
 
-// Make spec constant
-#define SHMEM_PAD 4
-
 // shape notation: [dim(N), ..., dim(0)] -- stride(dim(j)) >= stride(dim(i)) if i > j
 layout(binding = 0) readonly buffer A {
     A_TYPE knl_data[];
@@ -76,6 +73,7 @@ layout(constant_id = 3) const uint BS_NPQ          = 128;
 // Thread-tile sizes
 layout(constant_id = 4) const uint TS_K            = 8;
 layout(constant_id = 5) const uint use_collectives = 1;
+layout(constant_id = 6) const uint SHMEM_PAD       = 4;
 
 uint32_t       tid     = gl_LocalInvocationID.x;
 const uint32_t WG_SIZE = gl_WorkGroupSize.x;

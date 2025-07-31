@@ -3095,6 +3095,10 @@ static void ggml_vk_load_shaders(vk_device& device) {
         uint32_t conv2d_TS_K   = 8;
         uint32_t conv2d_SHMEM_PAD = 4;
 
+        if (device->vendor_id == VK_VENDOR_ID_INTEL) {
+            conv2d_SHMEM_PAD = 0;
+        }
+
         switch (s) {
         default:
         case CONV_SHAPE_128x128:
@@ -7060,9 +7064,14 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             for (uint32_t i = 0; i < CONV_SHAPE_COUNT; ++i) {
                 tiles[i] = CEIL_DIV(elements[0], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[0]) * CEIL_DIV(elements[1], ctx->device->pipeline_conv2d_f32[i]->wg_denoms[1]);
             }
-            if (elements[0] > 64 && tiles[CONV_SHAPE_128x128] >= ctx->device->shader_core_count * 2) {
+
+            // We can't query number of shader cores on Intel, use 32 as a placeholder
+            // so small convolutions will still choose a smaller tile.
+            const uint32_t shader_core_count = ctx->device->shader_core_count > 0 ? ctx->device->shader_core_count : 32;
+
+            if (elements[0] > 64 && tiles[CONV_SHAPE_128x128] >= shader_core_count * 2) {
                 shape = CONV_SHAPE_128x128;
-            } else if (elements[0] <= 32 && tiles[CONV_SHAPE_32x256] >= ctx->device->shader_core_count * 2) {
+            } else if (elements[0] <= 32 && tiles[CONV_SHAPE_32x256] >= shader_core_count * 2) {
                 shape = CONV_SHAPE_32x256;
             } else {
                 shape = CONV_SHAPE_64x32;

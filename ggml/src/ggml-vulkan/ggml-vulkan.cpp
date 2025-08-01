@@ -3099,6 +3099,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
         if (device->vendor_id == VK_VENDOR_ID_INTEL) {
             conv2d_SHMEM_PAD = 0;
             conv2d_UNROLL = false;
+        } else if (device->vendor_id == VK_VENDOR_ID_AMD) {
+            conv2d_SHMEM_PAD = device->architecture == vk_device_architecture::AMD_GCN ? 1 : 4;
         }
 
         switch (s) {
@@ -3107,6 +3109,9 @@ static void ggml_vk_load_shaders(vk_device& device) {
             conv2d_BS_K = 128;
             conv2d_BS_NPQ = 128;
             conv2d_BS_CRS = 16;
+            if (device->vendor_id == VK_VENDOR_ID_AMD && device->architecture != vk_device_architecture::AMD_GCN) {
+                conv2d_UNROLL = false;
+            }
             break;
         case CONV_SHAPE_64x32:
             conv2d_BS_K = 64;
@@ -3121,13 +3126,16 @@ static void ggml_vk_load_shaders(vk_device& device) {
             break;
         }
 
-        // Use collectives on pre-Turing NVIDIA GPUs, which had slower integer math.
+        // Use collectives on pre-Turing NVIDIA GPUs and GCN AMD cards, which had slower integer math.
         bool allow_collectives_nv = device->vendor_id != VK_VENDOR_ID_NVIDIA ||
                                     device->architecture == vk_device_architecture::NVIDIA_PRE_TURING;
+        bool allow_collectives_amd = device->vendor_id != VK_VENDOR_ID_AMD ||
+                                     device->architecture == vk_device_architecture::AMD_GCN;
 
         if (device->subgroup_shuffle &&
             device->vendor_id != VK_VENDOR_ID_INTEL &&   // Do not enable collectives on Intel, see PR 14316.
-            allow_collectives_nv) {
+            allow_collectives_nv &&
+            allow_collectives_amd) {
             use_collectives = 1;
             conv2d_BS_CRS   = std::min(
                 device->subgroup_size,

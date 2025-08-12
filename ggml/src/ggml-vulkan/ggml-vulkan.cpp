@@ -3429,10 +3429,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
         }
         device->float_controls_rte_fp16 = vk12_props.shaderRoundingModeRTEFloat16;
 
-        device->multi_add = vk12_props.shaderRoundingModeRTEFloat16 &&
-                            device->properties.limits.maxPushConstantsSize >= sizeof(vk_op_multi_add_push_constants) &&
-                            getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
-
         device->subgroup_add = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eArithmetic);
 
@@ -3571,6 +3567,11 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
 
         device->pipeline_robustness = pl_robustness_features.pipelineRobustness;
+
+        device->multi_add = vk12_props.shaderRoundingModeRTEFloat16 &&
+                            device->properties.limits.maxPushConstantsSize >= sizeof(vk_op_multi_add_push_constants) &&
+                            vk12_features.runtimeDescriptorArray &&
+                            getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
 
         if (device->subgroup_size_control) {
             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;

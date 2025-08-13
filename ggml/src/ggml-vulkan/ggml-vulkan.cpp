@@ -381,9 +381,8 @@ struct vk_device_struct {
     bool subgroup_shuffle;
     bool multi_add;
 
-    bool atomic_float_add;
     bool add_rms_fusion;
-    uint32_t atomic_binding_alignment;
+    uint32_t partials_binding_alignment;
 
     bool integer_dot_product;
 
@@ -492,6 +491,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_group_norm_f32;
     vk_pipeline pipeline_rms_norm_f32;
     vk_pipeline pipeline_rms_norm_mul_f32;
+    vk_pipeline pipeline_rms_norm_partials_f32;
+    vk_pipeline pipeline_rms_norm_mul_partials_f32;
     vk_pipeline pipeline_rms_norm_back_f32;
     vk_pipeline pipeline_l2_norm_f32;
 
@@ -1234,13 +1235,13 @@ struct ggml_backend_vk_context {
 
     size_t semaphore_idx, event_idx;
     ggml_vk_garbage_collector gc;
-    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k, prealloc_size_atomic_add, prealloc_size_atomic_add_offset;
-    vk_buffer prealloc_x, prealloc_y, prealloc_split_k, prealloc_atomic_add;
+    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k, prealloc_size_add_rms_partials, prealloc_size_add_rms_partials_offset;
+    vk_buffer prealloc_x, prealloc_y, prealloc_split_k, prealloc_add_rms_partials;
     vk::Fence fence, almost_ready_fence;
     bool almost_ready_fence_pending {};
     // Set before op_add and unset after op_rms_norm to indicate that the add should
-    // use atomics to accumulate the square of the vector components
-    bool do_add_rms_atomic;
+    // write partial sums to accumulate the square of the vector components
+    bool do_add_rms_partials;
 
     // Cache most recent tensor that was converted into prealloc_y, and what pipeline it used to convert.
     vk_pipeline_struct * prealloc_y_last_pipeline_used {};
@@ -3002,8 +3003,12 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     ggml_vk_create_pipeline(device, device->pipeline_norm_f32, "norm_f32", norm_f32_len, norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_group_norm_f32, "group_norm_f32", group_norm_f32_len, group_norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
+
     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_f32, "rms_norm_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1, true);
     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_f32, "rms_norm_mul_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_partials_f32, "rms_norm_partials_f32", rms_norm_partials_f32_len, rms_norm_partials_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_partials_f32, "rms_norm_mul_partials_f32", rms_norm_partials_f32_len, rms_norm_partials_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1, true);
+
     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_back_f32, "rms_norm_back_f32", rms_norm_back_f32_len, rms_norm_back_f32_data, "main", 3, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_l2_norm_f32, "l2_norm_f32", l2_norm_f32_len, l2_norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
 
@@ -3375,7 +3380,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->coopmat_support = false;
         device->integer_dot_product = false;
         bool bfloat16_support = false;
-        bool atomic_float_support = false;
 
         for (const auto& properties : ext_props) {
             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
@@ -3415,8 +3419,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
                        !getenv("GGML_VK_DISABLE_BFLOAT16")) {
                 bfloat16_support = true;
 #endif
-            } else if (strcmp("VK_EXT_shader_atomic_float", properties.extensionName) == 0) {
-                atomic_float_support = true;
             }
         }
 
@@ -3633,14 +3635,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_KHR_shader_integer_dot_product");
         }
 
-        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features {};
-        atomic_float_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
-        if (atomic_float_support) {
-            last_struct->pNext = (VkBaseOutStructure *)&atomic_float_features;
-            last_struct = (VkBaseOutStructure *)&atomic_float_features;
-            device_extensions.push_back("VK_EXT_shader_atomic_float");
-        }
-
         vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
 
         device->fp16 = device->fp16 && vk12_features.shaderFloat16;
@@ -3652,7 +3646,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
 
         device->pipeline_robustness = pl_robustness_features.pipelineRobustness;
-        device->atomic_float_add = atomic_float_features.shaderBufferFloat32AtomicAdd;
 
         device->multi_add = vk12_props.shaderRoundingModeRTEFloat16 &&
                             device->properties.limits.maxPushConstantsSize >= sizeof(vk_op_multi_add_push_constants) &&
@@ -3974,9 +3967,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
 
         device->add_rms_fusion = !device->disable_fusion &&
-                                 device->subgroup_add &&
-                                 device->atomic_float_add;
-        device->atomic_binding_alignment =
+                                 device->subgroup_add;
+        device->partials_binding_alignment =
             std::max(4u, (uint32_t)device->properties.limits.minStorageBufferOffsetAlignment);
 
         return device;
@@ -7144,13 +7136,13 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         case GGML_OP_ADD:
         {
             if (ctx->num_additional_fused_ops > 0) {
-                if (ctx->do_add_rms_atomic) {
+                if (ctx->do_add_rms_partials) {
                     return ctx->device->pipeline_multi_add_rms[ctx->num_additional_fused_ops];
                 } else {
                     return ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops];
                 }
             }
-            if (ctx->do_add_rms_atomic) {
+            if (ctx->do_add_rms_partials) {
                 auto pipelines = ggml_are_same_shape(src0, src1) ? ctx->device->pipeline_add_rms_norepeat : ctx->device->pipeline_add_rms;
                 return pipelines[src0->type == GGML_TYPE_F16][src1->type == GGML_TYPE_F16][dst->type == GGML_TYPE_F16];
             } else {
@@ -7279,7 +7271,11 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         return nullptr;
     case GGML_OP_RMS_NORM:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-            return ctx->num_additional_fused_ops > 0 ? ctx->device->pipeline_rms_norm_mul_f32 : ctx->device->pipeline_rms_norm_f32;
+            if (ctx->do_add_rms_partials) {
+                return ctx->num_additional_fused_ops > 0 ? ctx->device->pipeline_rms_norm_mul_partials_f32 : ctx->device->pipeline_rms_norm_partials_f32;
+            } else {
+                return ctx->num_additional_fused_ops > 0 ? ctx->device->pipeline_rms_norm_mul_f32 : ctx->device->pipeline_rms_norm_f32;
+            }
         }
         return nullptr;
     case GGML_OP_RMS_NORM_BACK:
@@ -7792,7 +7788,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             }
         } break;
     case GGML_OP_RMS_NORM:
-        if (ctx->do_add_rms_atomic) {
+        if (ctx->do_add_rms_partials) {
             // Run one element per thread, 128 threads per workgroup
             elements = { (uint32_t)CEIL_DIV(ne00, 128), 1, 1 };
         } else {
@@ -7947,8 +7943,8 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     }
 
     if (op == GGML_OP_ADD || op == GGML_OP_RMS_NORM) {
-        vk_buffer d_A = ctx->prealloc_atomic_add ? ctx->prealloc_atomic_add : d_X;
-        size_t a_buf_offset = ctx->prealloc_atomic_add ? ctx->prealloc_size_atomic_add_offset : 0;
+        vk_buffer d_A = ctx->prealloc_add_rms_partials ? ctx->prealloc_add_rms_partials : d_X;
+        size_t a_buf_offset = ctx->prealloc_add_rms_partials ? ctx->prealloc_size_add_rms_partials_offset : 0;
         ggml_vk_sync_buffers(subctx);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
             { vk_subbuffer{ d_X, x_buf_offset, x_sz },
@@ -8159,7 +8155,7 @@ static void ggml_vk_add(ggml_backend_vk_context * ctx, vk_context& subctx, const
         (uint32_t)src1->ne[0], (uint32_t)src1->ne[1], (uint32_t)src1->ne[2],(uint32_t)src1->ne[3], (uint32_t)src1->nb[0] / src1_type_size, (uint32_t)src1->nb[1] / src1_type_size, (uint32_t)src1->nb[2] / src1_type_size, (uint32_t)src1->nb[3] / src1_type_size,
         (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], (uint32_t) dst->ne[2],(uint32_t) dst->ne[3], (uint32_t) dst->nb[0] /  dst_type_size, (uint32_t) dst->nb[1] /  dst_type_size, (uint32_t) dst->nb[2] /  dst_type_size, (uint32_t) dst->nb[3] /  dst_type_size,
         0,
-        0.0f, 0.0f, ctx->do_add_rms_atomic,
+        0.0f, 0.0f, ctx->do_add_rms_partials,
     }, dryrun);
 }
 
@@ -8617,10 +8613,25 @@ static void ggml_vk_group_norm(ggml_backend_vk_context * ctx, vk_context& subctx
     ggml_vk_op_f32<vk_op_push_constants>(ctx, subctx, src0, nullptr, nullptr, dst, GGML_OP_GROUP_NORM, { group_size, 0, eps, 0.0f }, dryrun);
 }
 
+static uint32_t ggml_vk_rms_num_partials(ggml_backend_vk_context * ctx, const ggml_tensor *node) {
+    const uint32_t ne = (uint32_t)node->ne[0];
+    const uint32_t denom = ctx->device->pipeline_add_rms[0][0][0]->wg_denoms[0];
+    const uint32_t num_partials = CEIL_DIV(ne, denom);
+    return num_partials;
+}
+
+static uint32_t ggml_vk_rms_partials_size(ggml_backend_vk_context * ctx, const ggml_tensor *node) {
+    const uint32_t num_partials = ggml_vk_rms_num_partials(ctx, node);
+    const uint32_t num_bytes = ROUNDUP_POW2(num_partials * sizeof(uint32_t), ctx->device->partials_binding_alignment);
+    return num_bytes;
+}
+
 static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, float * op_params, bool dryrun = false) {
     const uint32_t src0_type_size = ggml_type_size(src0->type);
     const uint32_t src1_type_size = ggml_type_size(src1->type);
     const uint32_t dst_type_size = ggml_type_size(dst->type);
+
+    uint32_t param3 = ctx->do_add_rms_partials ? ggml_vk_rms_num_partials(ctx, dst) : 0;
 
     ggml_vk_op_f32<vk_op_binary_push_constants>(ctx, subctx, src0, src1, nullptr, dst, GGML_OP_RMS_NORM, {
         (uint32_t)ggml_nelements(src0),
@@ -8628,12 +8639,12 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, 
         (uint32_t)src1->ne[0], (uint32_t)src1->ne[1], (uint32_t)src1->ne[2],(uint32_t)src1->ne[3], (uint32_t)src1->nb[0] / src1_type_size, (uint32_t)src1->nb[1] / src1_type_size, (uint32_t)src1->nb[2] / src1_type_size, (uint32_t)src1->nb[3] / src1_type_size,
         (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], (uint32_t) dst->ne[2],(uint32_t) dst->ne[3], (uint32_t) dst->nb[0] /  dst_type_size, (uint32_t) dst->nb[1] /  dst_type_size, (uint32_t) dst->nb[2] /  dst_type_size, (uint32_t) dst->nb[3] /  dst_type_size,
         0,
-        op_params[0], 0.0f, ctx->do_add_rms_atomic,
+        op_params[0], 0.0f, (int32_t)param3,
     }, dryrun);
 
-    if (ctx->do_add_rms_atomic) {
-        ctx->prealloc_size_atomic_add_offset += ctx->device->atomic_binding_alignment;
-        ctx->do_add_rms_atomic = false;
+    if (ctx->do_add_rms_partials) {
+        ctx->prealloc_size_add_rms_partials_offset += ggml_vk_rms_partials_size(ctx, src0);
+        ctx->do_add_rms_partials = false;
     }
 }
 
@@ -9912,13 +9923,13 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx) {
         }
         ctx->prealloc_split_k = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_split_k);
     }
-    if (ctx->prealloc_atomic_add == nullptr || (ctx->prealloc_size_atomic_add > 0 && ctx->prealloc_atomic_add->size < ctx->prealloc_size_atomic_add)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(atomic_add_size: " << ctx->prealloc_atomic_add << ")");
+    if (ctx->prealloc_add_rms_partials == nullptr || (ctx->prealloc_size_add_rms_partials > 0 && ctx->prealloc_add_rms_partials->size < ctx->prealloc_size_add_rms_partials)) {
+        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(add_partials_size: " << ctx->prealloc_add_rms_partials << ")");
         // Resize buffer
-        if (ctx->prealloc_atomic_add != nullptr) {
-            ggml_vk_destroy_buffer(ctx->prealloc_atomic_add);
+        if (ctx->prealloc_add_rms_partials != nullptr) {
+            ggml_vk_destroy_buffer(ctx->prealloc_add_rms_partials);
         }
-        ctx->prealloc_atomic_add = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_atomic_add);
+        ctx->prealloc_add_rms_partials = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_add_rms_partials);
     }
 }
 
@@ -9983,9 +9994,9 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
             ggml_nrows(cgraph->nodes[node_idx + 1]) == 1 &&
             ctx->device->add_rms_fusion) {
             if (dryrun) {
-                ctx->prealloc_size_atomic_add += ctx->device->atomic_binding_alignment;
+                ctx->prealloc_size_add_rms_partials += ggml_vk_rms_partials_size(ctx, cgraph->nodes[node_idx]);
             }
-            ctx->do_add_rms_atomic = true;
+            ctx->do_add_rms_partials = true;
         }
         break;
     case GGML_OP_REPEAT:
@@ -10113,7 +10124,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
                 vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, src0, src1, src2, node, node->op);
                 ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
                 if (node->op == GGML_OP_RMS_NORM) {
-                    ctx->do_add_rms_atomic = false;
+                    ctx->do_add_rms_partials = false;
                 }
                 return false;
             }
@@ -11184,9 +11195,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         vk_instance.pfn_vkQueueBeginDebugUtilsLabelEXT(ctx->device->compute_queue.queue, reinterpret_cast<VkDebugUtilsLabelEXT*>(&dul));
     }
 
-    ctx->prealloc_size_atomic_add = 0;
-    ctx->prealloc_size_atomic_add_offset = 0;
-    ctx->do_add_rms_atomic = false;
+    ctx->prealloc_size_add_rms_partials = 0;
+    ctx->prealloc_size_add_rms_partials_offset = 0;
+    ctx->do_add_rms_partials = false;
 
     uint64_t total_mat_mul_bytes = 0;
     for (int i = 0; i < cgraph->n_nodes; i++) {
@@ -11256,7 +11267,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     ctx->prealloc_y_last_pipeline_used = nullptr;
     ctx->prealloc_y_last_tensor_used = nullptr;
 
-    if (ctx->prealloc_size_atomic_add) {
+    if (ctx->prealloc_size_add_rms_partials) {
         if (ctx->compute_ctx.expired()) {
             compute_ctx = ggml_vk_create_context(ctx, ctx->compute_cmd_pool);
             ctx->compute_ctx = compute_ctx;
@@ -11264,8 +11275,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         } else {
             compute_ctx = ctx->compute_ctx.lock();
         }
-        // initialize atomic sums to zero.
-        ggml_vk_buffer_memset_async(compute_ctx, ctx->prealloc_atomic_add, 0, 0, ctx->prealloc_size_atomic_add);
+        // initialize partial sums to zero.
+        ggml_vk_buffer_memset_async(compute_ctx, ctx->prealloc_add_rms_partials, 0, 0, ctx->prealloc_size_add_rms_partials);
     }
 
     // Submit after enough work has accumulated, to overlap CPU cmdbuffer generation with GPU execution.

@@ -381,6 +381,10 @@ struct vk_device_struct {
     bool subgroup_shuffle;
     bool multi_add;
 
+    bool atomic_float_add;
+    bool add_rms_fusion;
+    uint32_t atomic_binding_alignment;
+
     bool integer_dot_product;
 
     bool subgroup_size_control;
@@ -460,6 +464,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_mul_norepeat[2][2][2];
     vk_pipeline pipeline_div[2][2][2];
     vk_pipeline pipeline_div_norepeat[2][2][2];
+    vk_pipeline pipeline_add_rms[2][2][2];
+    vk_pipeline pipeline_add_rms_norepeat[2][2][2];
 
     // indexed by num_additional_fused_ops == num_adds - 1
     vk_pipeline pipeline_multi_add[MAX_FUSED_ADDS];
@@ -1208,6 +1214,12 @@ class vk_perf_logger {
             timings[name].push_back(time);
             return;
         }
+        if (node->op == GGML_OP_RMS_NORM) {
+            std::string   name    = ggml_op_name(node->op);
+            name += "(" + std::to_string(node->ne[0]) + "," + std::to_string(node->ne[1]) + "," + std::to_string(node->ne[2]) + "," + std::to_string(node->ne[3]) + ")";
+            timings[name].push_back(time);
+            return;
+        }
         timings[ggml_op_name(node->op)].push_back(time);
     }
   private:
@@ -1222,10 +1234,13 @@ struct ggml_backend_vk_context {
 
     size_t semaphore_idx, event_idx;
     ggml_vk_garbage_collector gc;
-    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k;
-    vk_buffer prealloc_x, prealloc_y, prealloc_split_k;
+    size_t prealloc_size_x, prealloc_size_y, prealloc_size_split_k, prealloc_size_atomic_add, prealloc_size_atomic_add_offset;
+    vk_buffer prealloc_x, prealloc_y, prealloc_split_k, prealloc_atomic_add;
     vk::Fence fence, almost_ready_fence;
     bool almost_ready_fence_pending {};
+    // Set before op_add and unset after op_rms_norm to indicate that the add should
+    // use atomics to accumulate the square of the vector components
+    bool do_add_rms_atomic;
 
     // Cache most recent tensor that was converted into prealloc_y, and what pipeline it used to convert.
     vk_pipeline_struct * prealloc_y_last_pipeline_used {};
@@ -2987,8 +3002,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     ggml_vk_create_pipeline(device, device->pipeline_norm_f32, "norm_f32", norm_f32_len, norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_group_norm_f32, "group_norm_f32", group_norm_f32_len, group_norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_f32, "rms_norm_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_f32, "rms_norm_mul_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_f32, "rms_norm_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_f32, "rms_norm_mul_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1, true);
     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_back_f32, "rms_norm_back_f32", rms_norm_back_f32_len, rms_norm_back_f32_data, "main", 3, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_l2_norm_f32, "l2_norm_f32", l2_norm_f32_len, l2_norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
 
@@ -3058,20 +3073,22 @@ static void ggml_vk_load_shaders(vk_device& device) {
     };
 
     bool rte = device->float_controls_rte_fp16;
-#define CREATE_BINARY(name, namemod, spec) \
+#define CREATE_BINARY(name, namemod, spec, bindings) \
     for (int s0 : {0,1}) for (int s1 : {0,1}) for (int d : {0,1}) \
         ggml_vk_create_pipeline(device, device->pipeline_ ## name ## namemod[s0][s1][d], \
                                 #name + get_suffix(s0, s1, d) + #namemod, name ## _len[s0][s1][d][rte], name ## _data[s0][s1][d][rte], \
-                                "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, spec, 1);
+                                "main", (bindings), sizeof(vk_op_binary_push_constants), {512, 1, 1}, spec, 1);
 
-    CREATE_BINARY(add, , {0})
-    CREATE_BINARY(add, _norepeat, {1})
-    CREATE_BINARY(sub, , {0})
-    CREATE_BINARY(sub, _norepeat, {1})
-    CREATE_BINARY(mul, , {0})
-    CREATE_BINARY(mul, _norepeat, {1})
-    CREATE_BINARY(div, , {0})
-    CREATE_BINARY(div, _norepeat, {1})
+    CREATE_BINARY(add, , {0}, 4)
+    CREATE_BINARY(add, _norepeat, {1}, 4)
+    CREATE_BINARY(sub, , {0}, 3)
+    CREATE_BINARY(sub, _norepeat, {1}, 3)
+    CREATE_BINARY(mul, , {0}, 3)
+    CREATE_BINARY(mul, _norepeat, {1}, 3)
+    CREATE_BINARY(div, , {0}, 3)
+    CREATE_BINARY(div, _norepeat, {1}, 3)
+    CREATE_BINARY(add_rms, , {0}, 4)
+    CREATE_BINARY(add_rms, _norepeat, {1}, 4)
 #undef CREATE_BINARY
 
     if (device->multi_add) {
@@ -3358,6 +3375,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->coopmat_support = false;
         device->integer_dot_product = false;
         bool bfloat16_support = false;
+        bool atomic_float_support = false;
 
         for (const auto& properties : ext_props) {
             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
@@ -3397,6 +3415,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
                        !getenv("GGML_VK_DISABLE_BFLOAT16")) {
                 bfloat16_support = true;
 #endif
+            } else if (strcmp("VK_EXT_shader_atomic_float", properties.extensionName) == 0) {
+                atomic_float_support = true;
             }
         }
 
@@ -3613,6 +3633,14 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_KHR_shader_integer_dot_product");
         }
 
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features {};
+        atomic_float_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+        if (atomic_float_support) {
+            last_struct->pNext = (VkBaseOutStructure *)&atomic_float_features;
+            last_struct = (VkBaseOutStructure *)&atomic_float_features;
+            device_extensions.push_back("VK_EXT_shader_atomic_float");
+        }
+
         vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
 
         device->fp16 = device->fp16 && vk12_features.shaderFloat16;
@@ -3624,6 +3652,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
 
         device->pipeline_robustness = pl_robustness_features.pipelineRobustness;
+        device->atomic_float_add = atomic_float_features.shaderBufferFloat32AtomicAdd;
 
         device->multi_add = vk12_props.shaderRoundingModeRTEFloat16 &&
                             device->properties.limits.maxPushConstantsSize >= sizeof(vk_op_multi_add_push_constants) &&
@@ -3943,6 +3972,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->idx = idx;
 
         device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
+
+        device->add_rms_fusion = !device->disable_fusion &&
+                                 device->subgroup_add &&
+                                 device->atomic_float_add;
+        device->atomic_binding_alignment =
+            std::max(4u, (uint32_t)device->properties.limits.minStorageBufferOffsetAlignment);
 
         return device;
     }
@@ -7109,10 +7144,19 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         case GGML_OP_ADD:
         {
             if (ctx->num_additional_fused_ops > 0) {
-                return ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops];
+                if (ctx->do_add_rms_atomic) {
+                    return ctx->device->pipeline_multi_add_rms[ctx->num_additional_fused_ops];
+                } else {
+                    return ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops];
+                }
             }
-            auto pipelines = ggml_are_same_shape(src0, src1) ? ctx->device->pipeline_add_norepeat : ctx->device->pipeline_add;
-            return pipelines[src0->type == GGML_TYPE_F16][src1->type == GGML_TYPE_F16][dst->type == GGML_TYPE_F16];
+            if (ctx->do_add_rms_atomic) {
+                auto pipelines = ggml_are_same_shape(src0, src1) ? ctx->device->pipeline_add_rms_norepeat : ctx->device->pipeline_add_rms;
+                return pipelines[src0->type == GGML_TYPE_F16][src1->type == GGML_TYPE_F16][dst->type == GGML_TYPE_F16];
+            } else {
+                auto pipelines = ggml_are_same_shape(src0, src1) ? ctx->device->pipeline_add_norepeat : ctx->device->pipeline_add;
+                return pipelines[src0->type == GGML_TYPE_F16][src1->type == GGML_TYPE_F16][dst->type == GGML_TYPE_F16];
+            }
         }
         case GGML_OP_SUB:
         {
@@ -7748,7 +7792,12 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             }
         } break;
     case GGML_OP_RMS_NORM:
-        elements = { (uint32_t)ne01, (uint32_t)ne02, (uint32_t)ne03 };
+        if (ctx->do_add_rms_atomic) {
+            // Run one element per thread, 128 threads per workgroup
+            elements = { (uint32_t)CEIL_DIV(ne00, 128), 1, 1 };
+        } else {
+            elements = { (uint32_t)ne01, (uint32_t)ne02, (uint32_t)ne03 };
+        }
         break;
 
     case GGML_OP_SUM:
@@ -7897,7 +7946,17 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         }
     }
 
-    if (op == GGML_OP_GLU) {
+    if (op == GGML_OP_ADD || op == GGML_OP_RMS_NORM) {
+        vk_buffer d_A = ctx->prealloc_atomic_add ? ctx->prealloc_atomic_add : d_X;
+        size_t a_buf_offset = ctx->prealloc_atomic_add ? ctx->prealloc_size_atomic_add_offset : 0;
+        ggml_vk_sync_buffers(subctx);
+        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+            { vk_subbuffer{ d_X, x_buf_offset, x_sz },
+              vk_subbuffer{ d_Y, y_buf_offset, y_sz },
+              vk_subbuffer{ d_D, d_buf_offset, d_sz },
+              vk_subbuffer{ d_A, a_buf_offset, VK_WHOLE_SIZE },
+            }, pc, elements);
+    } else if (op == GGML_OP_GLU) {
         // Empty src1 is possible in glu, but the shader needs a buffer
         vk_subbuffer subbuf_y;
         if (use_src1) {
@@ -8100,7 +8159,7 @@ static void ggml_vk_add(ggml_backend_vk_context * ctx, vk_context& subctx, const
         (uint32_t)src1->ne[0], (uint32_t)src1->ne[1], (uint32_t)src1->ne[2],(uint32_t)src1->ne[3], (uint32_t)src1->nb[0] / src1_type_size, (uint32_t)src1->nb[1] / src1_type_size, (uint32_t)src1->nb[2] / src1_type_size, (uint32_t)src1->nb[3] / src1_type_size,
         (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], (uint32_t) dst->ne[2],(uint32_t) dst->ne[3], (uint32_t) dst->nb[0] /  dst_type_size, (uint32_t) dst->nb[1] /  dst_type_size, (uint32_t) dst->nb[2] /  dst_type_size, (uint32_t) dst->nb[3] /  dst_type_size,
         0,
-        0.0f, 0.0f, 0,
+        0.0f, 0.0f, ctx->do_add_rms_atomic,
     }, dryrun);
 }
 
@@ -8569,8 +8628,13 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, 
         (uint32_t)src1->ne[0], (uint32_t)src1->ne[1], (uint32_t)src1->ne[2],(uint32_t)src1->ne[3], (uint32_t)src1->nb[0] / src1_type_size, (uint32_t)src1->nb[1] / src1_type_size, (uint32_t)src1->nb[2] / src1_type_size, (uint32_t)src1->nb[3] / src1_type_size,
         (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], (uint32_t) dst->ne[2],(uint32_t) dst->ne[3], (uint32_t) dst->nb[0] /  dst_type_size, (uint32_t) dst->nb[1] /  dst_type_size, (uint32_t) dst->nb[2] /  dst_type_size, (uint32_t) dst->nb[3] /  dst_type_size,
         0,
-        op_params[0], 0.0f, 0,
+        op_params[0], 0.0f, ctx->do_add_rms_atomic,
     }, dryrun);
+
+    if (ctx->do_add_rms_atomic) {
+        ctx->prealloc_size_atomic_add_offset += ctx->device->atomic_binding_alignment;
+        ctx->do_add_rms_atomic = false;
+    }
 }
 
 static void ggml_vk_rms_norm_back(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, bool dryrun = false) {
@@ -9848,6 +9912,14 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx) {
         }
         ctx->prealloc_split_k = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_split_k);
     }
+    if (ctx->prealloc_atomic_add == nullptr || (ctx->prealloc_size_atomic_add > 0 && ctx->prealloc_atomic_add->size < ctx->prealloc_size_atomic_add)) {
+        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(atomic_add_size: " << ctx->prealloc_atomic_add << ")");
+        // Resize buffer
+        if (ctx->prealloc_atomic_add != nullptr) {
+            ggml_vk_destroy_buffer(ctx->prealloc_atomic_add);
+        }
+        ctx->prealloc_atomic_add = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_atomic_add);
+    }
 }
 
 static bool ggml_vk_compute_forward(ggml_backend_vk_context* ctx, ggml_cgraph * cgraph, ggml_tensor* tensor, int tensor_idx, bool use_fence, bool almost_ready);
@@ -9904,10 +9976,21 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
             return false;
         }
         break;
+    case GGML_OP_ADD:
+        if (node_idx + 1 < cgraph->n_nodes &&
+            cgraph->nodes[node_idx + 1]->op == GGML_OP_RMS_NORM &&
+            cgraph->nodes[node_idx + 1]->src[0] == cgraph->nodes[node_idx] &&
+            ggml_nrows(cgraph->nodes[node_idx + 1]) == 1 &&
+            ctx->device->add_rms_fusion) {
+            if (dryrun) {
+                ctx->prealloc_size_atomic_add += ctx->device->atomic_binding_alignment;
+            }
+            ctx->do_add_rms_atomic = true;
+        }
+        break;
     case GGML_OP_REPEAT:
     case GGML_OP_REPEAT_BACK:
     case GGML_OP_GET_ROWS:
-    case GGML_OP_ADD:
     case GGML_OP_ADD_ID:
     case GGML_OP_ACC:
     case GGML_OP_SUB:
@@ -10029,6 +10112,9 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
                 // do the only thing needed for the dryrun.
                 vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, src0, src1, src2, node, node->op);
                 ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+                if (node->op == GGML_OP_RMS_NORM) {
+                    ctx->do_add_rms_atomic = false;
+                }
                 return false;
             }
         default:
@@ -11098,6 +11184,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         vk_instance.pfn_vkQueueBeginDebugUtilsLabelEXT(ctx->device->compute_queue.queue, reinterpret_cast<VkDebugUtilsLabelEXT*>(&dul));
     }
 
+    ctx->prealloc_size_atomic_add = 0;
+    ctx->prealloc_size_atomic_add_offset = 0;
+    ctx->do_add_rms_atomic = false;
+
     uint64_t total_mat_mul_bytes = 0;
     for (int i = 0; i < cgraph->n_nodes; i++) {
         if (!ctx->device->disable_fusion) {
@@ -11165,6 +11255,18 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
     ctx->prealloc_y_last_pipeline_used = nullptr;
     ctx->prealloc_y_last_tensor_used = nullptr;
+
+    if (ctx->prealloc_size_atomic_add) {
+        if (ctx->compute_ctx.expired()) {
+            compute_ctx = ggml_vk_create_context(ctx, ctx->compute_cmd_pool);
+            ctx->compute_ctx = compute_ctx;
+            ggml_vk_ctx_begin(ctx->device, compute_ctx);
+        } else {
+            compute_ctx = ctx->compute_ctx.lock();
+        }
+        // initialize atomic sums to zero.
+        ggml_vk_buffer_memset_async(compute_ctx, ctx->prealloc_atomic_add, 0, 0, ctx->prealloc_size_atomic_add);
+    }
 
     // Submit after enough work has accumulated, to overlap CPU cmdbuffer generation with GPU execution.
     // Estimate the amount of matmul work by looking at the weight matrix size, and submit every 100MB

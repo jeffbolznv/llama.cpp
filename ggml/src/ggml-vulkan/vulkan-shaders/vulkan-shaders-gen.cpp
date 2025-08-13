@@ -538,13 +538,15 @@ void process_shaders() {
         s += std::string(dst_f16 ? "_f16" : "_f32");
         return s;
     };
-    for (std::string op : {"add", "sub", "mul", "div"}) {
+    for (std::string op : {"add", "sub", "mul", "div", "add_rms", }) {
     for (auto src0_f16 : {false, true}) {
     for (auto src1_f16 : {false, true}) {
     for (auto dst_f16  : {false, true}) {
     for (auto rte      : {false, true}) {
+        auto source = op == "add_rms" ? std::string("add") : op;
         auto name = op + get_suffix(src0_f16, src1_f16, dst_f16) + (rte ? "_rte" : "");
-        string_to_spv(name.c_str(), op + ".comp", {{"A_TYPE", get_type_str(src0_f16)}, {"B_TYPE", get_type_str(src1_f16)}, {"D_TYPE", get_type_str(dst_f16)}, {"FLOAT_TYPE", "float"}, {"RTE16", rte ? "1" : "0"}});
+        auto add_rms = op == "add_rms" ? "1" : "0";
+        string_to_spv(name.c_str(), source + ".comp", {{"A_TYPE", get_type_str(src0_f16)}, {"B_TYPE", get_type_str(src1_f16)}, {"D_TYPE", get_type_str(dst_f16)}, {"FLOAT_TYPE", "float"}, {"RTE16", rte ? "1" : "0"}, {"ADD_RMS" , add_rms}});
     }
     }
     }
@@ -745,7 +747,7 @@ void write_output_files() {
     }
 
     std::string suffixes[2] = {"_f32", "_f16"};
-    for (const char *op : {"add", "sub", "mul", "div"}) {
+    for (const char *op : {"add", "sub", "mul", "div", "add_rms"}) {
         fprintf(hdr, "extern unsigned char *%s_data[2][2][2][2];\n", op);
         fprintf(hdr, "extern uint64_t %s_len[2][2][2][2];\n", op);
         std::string data = "unsigned char *" + std::string(op) + "_data[2][2][2][2] = ";

@@ -1,11 +1,18 @@
 #version 450
 
 #extension GL_EXT_shader_16bit_storage : require
+#if ADD_RMS
+#extension GL_EXT_shader_atomic_float : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#endif
 
 #include "types.comp"
 #include "generic_binary_head.comp"
 
 const uint num_threads = 256;
+
+layout (binding = 3) buffer AtomBuf {float data_atom;};
 
 layout(local_size_x = num_threads, local_size_y = 1, local_size_z = 1) in;
 
@@ -15,6 +22,8 @@ void main() {
     // num_threads * num_iter must equal 512, to match the wg_denoms and get_idx calculation
     const uint num_iter = 2;
 
+    FLOAT_TYPE sum_sq = 0;
+
     [[unroll]] for (uint i = 0; i < num_iter; ++i) {
         if (idx >= p.ne) {
             continue;
@@ -22,8 +31,20 @@ void main() {
         uint i00, i01, i02, i03;
         get_indices(idx, i00, i01, i02, i03);
 
-        data_d[get_doffset() + dst_idx(i00, i01, i02, i03)] = D_TYPE(FLOAT_TYPE(data_a[get_aoffset() + src0_idx(i00, i01, i02, i03)]) + FLOAT_TYPE(data_b[get_boffset() + src1_idx(i00, i01, i02, i03)]));
+        FLOAT_TYPE sum = FLOAT_TYPE(data_a[get_aoffset() + src0_idx(i00, i01, i02, i03)]) + FLOAT_TYPE(data_b[get_boffset() + src1_idx(i00, i01, i02, i03)]);
+        sum_sq += sum*sum;
+
+        data_d[get_doffset() + dst_idx(i00, i01, i02, i03)] = D_TYPE(sum);
 
         idx += num_threads;
     }
+
+#if ADD_RMS
+    if (p.param3 != 0) {
+        sum_sq = subgroupAdd(sum_sq);
+        if (sum_sq != 0 && gl_SubgroupInvocationID == 0) {
+            atomicAdd(data_atom, sum_sq);
+        }
+    }
+#endif
 }

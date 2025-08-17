@@ -3974,7 +3974,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
 
         device->add_rms_fusion = !device->disable_fusion &&
-                                 device->subgroup_add;
+                                 device->subgroup_add &&
+                                 device->vendor_id != VK_VENDOR_ID_INTEL;
         device->partials_binding_alignment =
             std::max(4u, (uint32_t)device->properties.limits.minStorageBufferOffsetAlignment);
 

@@ -102,9 +102,9 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
 
 struct ggml_backend_vk_context;
 
-#define MAX_PARAMETER_COUNT 8
+#define MAX_PARAMETER_COUNT 12
 // Max number of adds that can be fused without exceeding MAX_PARAMETER_COUNT.
-#define MAX_FUSED_ADDS (MAX_PARAMETER_COUNT - 2)
+#define MAX_FUSED_ADDS (MAX_PARAMETER_COUNT - 3)
 
 struct vk_pipeline_struct {
     std::string name;
@@ -468,6 +468,7 @@ struct vk_device_struct {
 
     // indexed by num_additional_fused_ops == num_adds - 1
     vk_pipeline pipeline_multi_add[MAX_FUSED_ADDS];
+    vk_pipeline pipeline_multi_add_rms[MAX_FUSED_ADDS];
 
     vk_pipeline pipeline_add_id_f32;
 
@@ -830,8 +831,13 @@ struct vk_op_multi_add_push_constants {
     uint32_t ne20; uint32_t ne21; uint32_t ne22; uint32_t ne23;
 
     // strides for srcs+dst
-    uint32_t nb[8][4];
+    uint32_t nb[MAX_PARAMETER_COUNT][4];
+
+    uint32_t rms_partials;
 };
+// update multi_add.comp if this changes
+static_assert(MAX_PARAMETER_COUNT == 12);
+static_assert(sizeof(vk_op_multi_add_push_constants) <= 256);
 
 struct vk_op_add_id_push_constants {
     uint32_t ne0;
@@ -3098,7 +3104,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     if (device->multi_add) {
         for (uint32_t i = 0; i < MAX_FUSED_ADDS; ++i) {
-            ggml_vk_create_pipeline(device, device->pipeline_multi_add[i], "multi_add_f32_" + std::to_string(i+1), multi_add_f32_len, multi_add_f32_data, "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
+            ggml_vk_create_pipeline(device, device->pipeline_multi_add[i],     "multi_add_f32_"     + std::to_string(i+1), multi_add_f32_len,     multi_add_f32_data,     "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
+            ggml_vk_create_pipeline(device, device->pipeline_multi_add_rms[i], "multi_add_rms_f32_" + std::to_string(i+1), multi_add_rms_f32_len, multi_add_rms_f32_data, "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
         }
     }
 
@@ -7107,7 +7114,7 @@ static std::array<uint32_t, 3> ggml_vk_get_conv_elements(const ggml_tensor *dst)
     return elements;
 }
 
-static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, ggml_tensor * dst, ggml_op op) {
+static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * dst, ggml_op op) {
     switch (op) {
     case GGML_OP_GET_ROWS:
         GGML_ASSERT(src1->type == GGML_TYPE_I32);
@@ -8053,7 +8060,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
     const ggml_tensor *tensors[MAX_PARAMETER_COUNT];
     uint32_t num_srcs = ctx->num_additional_fused_ops + 2;
     uint32_t num_tensors = num_srcs + 1;
-    GGML_ASSERT(num_tensors <= MAX_PARAMETER_COUNT);
+    GGML_ASSERT(num_tensors + ctx->do_add_rms_partials <= MAX_PARAMETER_COUNT);
 
     tensors[0] = first_node->src[0];
     tensors[1] = first_node->src[1];
@@ -8080,8 +8087,9 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
         pc.nb[i][2] = (uint32_t)t->nb[2] / sizeof(float);
         pc.nb[i][3] = (uint32_t)t->nb[3] / sizeof(float);
     }
+    pc.rms_partials = ctx->do_add_rms_partials;
 
-    vk_pipeline pipeline = ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops];
+    vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, tensors[0], tensors[1], nullptr, dst, dst->op);
 
     if (pipeline == nullptr) {
         std::cerr << "ggml_vulkan: Error: Missing multi_add";
@@ -8119,6 +8127,10 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
         buf[i] = buf[0];
         offset[i] = 0;
     }
+    if (ctx->do_add_rms_partials) {
+        buf[num_tensors] = ctx->prealloc_add_rms_partials;
+        offset[num_tensors] = ctx->prealloc_size_add_rms_partials_offset;
+    }
 
     std::array<uint32_t, 3> elements;
 
@@ -8131,6 +8143,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
         elements = { ne, 1, 1 };
     }
 
+    static_assert(MAX_PARAMETER_COUNT == 12);
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
         {
             vk_subbuffer{ buf[0], offset[0], VK_WHOLE_SIZE },
@@ -8141,6 +8154,10 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
             vk_subbuffer{ buf[5], offset[5], VK_WHOLE_SIZE },
             vk_subbuffer{ buf[6], offset[6], VK_WHOLE_SIZE },
             vk_subbuffer{ buf[7], offset[7], VK_WHOLE_SIZE },
+            vk_subbuffer{ buf[8], offset[8], VK_WHOLE_SIZE },
+            vk_subbuffer{ buf[9], offset[9], VK_WHOLE_SIZE },
+            vk_subbuffer{ buf[10], offset[10], VK_WHOLE_SIZE },
+            vk_subbuffer{ buf[11], offset[11], VK_WHOLE_SIZE },
         }, pc, elements);
 }
 
@@ -9988,17 +10005,19 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         }
         break;
     case GGML_OP_ADD:
-        if (node_idx + 1 < cgraph->n_nodes &&
-            cgraph->nodes[node_idx + 1]->op == GGML_OP_RMS_NORM &&
-            cgraph->nodes[node_idx + 1]->src[0] == cgraph->nodes[node_idx] &&
-            ggml_nrows(cgraph->nodes[node_idx + 1]) == 1 &&
-            ctx->device->add_rms_fusion) {
-            if (dryrun) {
-                ctx->prealloc_size_add_rms_partials += ggml_vk_rms_partials_size(ctx, cgraph->nodes[node_idx]);
+        {
+            int next_node_idx = node_idx + 1 + ctx->num_additional_fused_ops;
+            if (next_node_idx < cgraph->n_nodes &&
+                cgraph->nodes[next_node_idx]->op == GGML_OP_RMS_NORM &&
+                cgraph->nodes[next_node_idx]->src[0] == cgraph->nodes[next_node_idx - 1] &&
+                ggml_nrows(cgraph->nodes[next_node_idx]) == 1 &&
+                ctx->device->add_rms_fusion) {
+                if (dryrun) {
+                    ctx->prealloc_size_add_rms_partials += ggml_vk_rms_partials_size(ctx, cgraph->nodes[node_idx]);
+                }
+                ctx->do_add_rms_partials = true;
             }
-            ctx->do_add_rms_partials = true;
-        }
-        break;
+        } break;
     case GGML_OP_REPEAT:
     case GGML_OP_REPEAT_BACK:
     case GGML_OP_GET_ROWS:

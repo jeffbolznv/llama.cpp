@@ -323,7 +323,9 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
     }
 
     base_dict["ACC_TYPE"] = f16acc ? "float16_t" : "float";
-    base_dict["ACC_TYPE_MAX"] = f16acc ? "\"float16_t(65504.0)\"" : "\"uintBitsToFloat(0x7F7FFFFF)\"";
+    if (f16acc) {
+        base_dict["ACC_TYPE_MAX"] = "\"float16_t(65504.0)\"";
+    }
 
     if (coopmat) {
         base_dict["COOPMAT"] = "1";
@@ -441,7 +443,9 @@ void process_shaders() {
         std::map<std::string, std::string> fa_base_dict = base_dict;
         fa_base_dict["ACC_TYPE"] = f16acc ? "float16_t" : "float";
         fa_base_dict["ACC_TYPEV4"] = f16acc ? "f16vec4" : "vec4";
-        fa_base_dict["ACC_TYPE_MAX"] = f16acc ? "\"float16_t(65504.0)\"" : "\"uintBitsToFloat(0x7F7FFFFF)\"";
+        if (f16acc) {
+            fa_base_dict["ACC_TYPE_MAX"] = "\"float16_t(65504.0)\"";
+        }
 
         for (const auto& tname : type_names) {
             if (tname == "f32") {

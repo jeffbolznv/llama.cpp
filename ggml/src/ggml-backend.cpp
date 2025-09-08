@@ -1305,6 +1305,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         struct ggml_backend_sched_split * split = &sched->splits[i];
         split->graph = ggml_graph_view(graph, split->i_start, split->i_end);
 
+        // Optimize this split of the graph. This needs to happen before we make graph_copy,
+        // so they are in sync.
+        ggml_backend_optimize_graph(sched->backends[split->backend_id], &split->graph);
+
         // add inputs to the graph copy so that they are allocated by ggml-alloc at the start of the split
         for (int j = 0; j < split->n_inputs; j++) {
             assert(graph_copy->size > (graph_copy->n_nodes + 1));
@@ -1709,16 +1713,6 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
     return true;
 }
 
-static void ggml_backend_sched_optimize_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
-    GGML_ASSERT(sched);
-    // Run through each backend, before splitting, giving a chance to optimize.
-    // Would be better to have each backend optimize its own split, but sched->graph
-    // gets out of sync.
-    for (int i = 0; i < sched->n_backends; i++) {
-        ggml_backend_optimize_graph(sched->backends[i], graph);
-    }
-}
-
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     GGML_ASSERT(sched);
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
@@ -1726,8 +1720,6 @@ bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     sched->cur_copy = sched->next_copy;
     sched->next_copy = (sched->next_copy + 1) % sched->n_copies;
-
-    ggml_backend_sched_optimize_graph(sched, graph);
 
     ggml_backend_sched_split_graph(sched, graph);
 

@@ -1442,4 +1442,36 @@ float e8m0_to_fp32(uint8_t x) {
     return uintBitsToFloat(bits);
 }
 
+#if BDA_SIZE == 64
+
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+
+#define BDA_T uint64_t
+#define BDA_OFFSET_T uint64_t
+
+uint64_t bda_offset_add(uint64_t bda, uint64_t offset)
+{
+    return bda + offset;
+}
+
+#elif BDA_SIZE == 32
+
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference_uvec2 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
+
+#define BDA_T uvec2
+#define BDA_OFFSET_T uint32_t
+
+uvec2 bda_offset_add(uvec2 bda, uint32_t offset)
+{
+    uint carry;
+    uint lo = uaddCarry(bda.x, offset, carry);
+    uint hi = bda.y + carry;
+    return uvec2(lo, hi);
+}
+
+#endif
+
 #endif // !defined(GGML_TYPES_COMP)

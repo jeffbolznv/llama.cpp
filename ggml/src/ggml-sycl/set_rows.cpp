@@ -16,9 +16,9 @@ convert (const char* src, char* dst) {
    *reinterpret_cast<TOut*>(dst) = dst_val;
 }
 
-template <typename blockType, int qk, cpy_kernel_t cpyblck>
+template <typename TIdx, typename blockType, int qk, cpy_kernel_t cpyblck>
 static void set_rows_sycl_q(const char * __restrict__ src0_d,
-                            const int64_t * __restrict__ src1_d,
+                            const TIdx * __restrict__ src1_d,
                             blockType * __restrict__ dst_d,
                             // tensor dimensions src0 and src1
                             const int64_t ne00,
@@ -66,7 +66,7 @@ static void set_rows_sycl_q(const char * __restrict__ src0_d,
         const size_t  src_offset  = calculate_offset<3>({ nb01, nb02, nb03 }, { i01, i02, i03 });
         const char *  src_block   = src0_d + src_offset + i00 * sizeof(float);
         const size_t  src1_offset = calculate_offset<3>({ nb10, nb11, nb12 }, { i10, i11, i12 });
-        const int64_t dst_row     = src1_d[src1_offset / sizeof(int64_t)];
+        const int64_t dst_row     = src1_d[src1_offset / sizeof(TIdx)];
         const size_t  dst_offset =
             calculate_offset<3>({ nb1, nb2, nb3 }, { dst_row, i02, i03 }) + (i00 / qk) * sizeof(blockType);
         char * dst_block = reinterpret_cast<char *>(reinterpret_cast<char *>(dst_d) + dst_offset);
@@ -78,9 +78,9 @@ static void set_rows_sycl_q(const char * __restrict__ src0_d,
     GGML_UNUSED(nb13);
 }
 
-template<typename TIn, typename TOut>
+template<typename TIn, typename TIdx, typename TOut>
 static void k_set_rows(
-        const char * __restrict__ src0, const int64_t * __restrict__ src1, char * __restrict__ dst,
+        const char * __restrict__ src0, const TIdx * __restrict__ src1, char * __restrict__ dst,
         const int64_t ne00, const int64_t ne01, const int64_t ne02,
         const int64_t ne11, const int64_t ne12,
         const size_t nb01, const size_t nb02, const size_t nb03,
@@ -104,7 +104,7 @@ static void k_set_rows(
     const int64_t i11 = i02 % ne11;
     const int64_t i10 = i01;
 
-    const int64_t dst_row = *(const int64_t *)((const char *)src1 + calculate_offset<3>({nb10, nb11, nb12}, {i10, i11, i12}));
+    const int64_t dst_row = *(const TIdx *)((const char *)src1 + calculate_offset<3>({nb10, nb11, nb12}, {i10, i11, i12}));
 
     const char * src0_row = src0 + calculate_offset<3>({nb01, nb02, nb03}, {i01, i02, i03});
     const char * src_elem = src0_row + i00 * src_type_size;
@@ -114,9 +114,9 @@ static void k_set_rows(
     convert<TIn, TOut>(src_elem, dst_elem);
 }
 
-template<typename TIn, typename TOut>
+template<typename TIn, typename TIdx, typename TOut>
 static void set_rows_sycl(
-        const char * src0_d, const int64_t * src1_d, char * dst_d,
+        const char * src0_d, const TIdx * src1_d, char * dst_d,
         const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
         const int64_t ne11, const int64_t ne12, const size_t nb01, const size_t nb02, const size_t nb03,
         const size_t nb10, const size_t nb11, const size_t nb12,
@@ -132,7 +132,7 @@ static void set_rows_sycl(
     stream->parallel_for(
         sycl::nd_range<1>(grid_size * block_size, block_size),
         [=](sycl::nd_item<1> item_ct1) {
-            k_set_rows<TIn, TOut>(
+            k_set_rows<TIn, TIdx, TOut>(
                 src0_d, src1_d, dst_d,
                 ne00, ne01, ne02,
                 ne11, ne12,
@@ -153,68 +153,129 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src1 = dst->src[1];
 
     GGML_ASSERT(dst->src[0]->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->src[1]->type == GGML_TYPE_I64);
+    GGML_ASSERT(dst->src[1]->type == GGML_TYPE_I64 || dst->src[1]->type == GGML_TYPE_I32);
 
     GGML_TENSOR_BINARY_OP_LOCALS
-
-    const int64_t * src1_dd = static_cast<const int64_t *>(src1->data);
 
     dpct::queue_ptr stream = ctx.stream();
     switch (dst->type) {
         case GGML_TYPE_F32:
-            set_rows_sycl<float, float>(
-                (const char *)src0->data, src1_dd, (char *)dst->data,
-                ne00, ne01, ne02, ne03,
-                ne11, ne12,
-                nb01, nb02, nb03,
-                nb10, nb11, nb12,
-                nb1, nb2, nb3,
-                sizeof(float), sizeof(float),
-                stream
-            );
+            if (src1->type == GGML_TYPE_I64) {
+               set_rows_sycl<float, float>(
+                    (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(float),
+                    stream
+                );
+            } else if (src1->type == GGML_TYPE_I32) {
+               set_rows_sycl<float, float>(
+                    (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(float),
+                    stream
+                );
+            }
             break;
         case GGML_TYPE_F16:
             dpct::has_capability_or_fail(stream->get_device(), { sycl::aspect::fp16 });
-            set_rows_sycl<float, sycl::half>(
-                (const char *)src0->data, src1_dd, (char *)dst->data,
-                ne00, ne01, ne02, ne03,
-                ne11, ne12,
-                nb01, nb02, nb03,
-                nb10, nb11, nb12,
-                nb1, nb2, nb3,
-                sizeof(float), sizeof(sycl::half),
-                stream
-            );
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl<float, sycl::half>(
+                    (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(sycl::half),
+                    stream
+                );
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl<float, sycl::half>(
+                    (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(sycl::half),
+                    stream
+                );
+            }
             break;
         case GGML_TYPE_BF16:
-            set_rows_sycl<float, sycl::ext::oneapi::bfloat16>(
-                (const char *)src0->data, src1_dd, (char *)dst->data,
-                ne00, ne01, ne02, ne03,
-                ne11, ne12,
-                nb01, nb02, nb03,
-                nb10, nb11, nb12,
-                nb1, nb2, nb3,
-                sizeof(float), sizeof(sycl::ext::oneapi::bfloat16),
-                stream
-            );
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl<float, sycl::ext::oneapi::bfloat16>(
+                    (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(sycl::ext::oneapi::bfloat16),
+                    stream
+                );
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl<float, sycl::ext::oneapi::bfloat16>(
+                    (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
+                    ne00, ne01, ne02, ne03,
+                    ne11, ne12,
+                    nb01, nb02, nb03,
+                    nb10, nb11, nb12,
+                    nb1, nb2, nb3,
+                    sizeof(float), sizeof(sycl::ext::oneapi::bfloat16),
+                    stream
+                );
+            }
             break;
         case GGML_TYPE_Q8_0:
-            set_rows_sycl_q<block_q8_0, QK8_0, cpy_blck_f32_q8_0>((const char *)src0->data, src1_dd, (block_q8_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_q8_0, QK8_0, cpy_blck_f32_q8_0>((const char *)src0->data, (const int64_t *)src1->data, (block_q8_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_q8_0, QK8_0, cpy_blck_f32_q8_0>((const char *)src0->data, (const int32_t *)src1->data, (block_q8_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
         case GGML_TYPE_Q5_1:
-            set_rows_sycl_q<block_q5_1, QK5_1, cpy_blck_f32_q5_1>((const char *)src0->data, src1_dd, (block_q5_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_q5_1, QK5_1, cpy_blck_f32_q5_1>((const char *)src0->data, (const int64_t *)src1->data, (block_q5_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_q5_1, QK5_1, cpy_blck_f32_q5_1>((const char *)src0->data, (const int32_t *)src1->data, (block_q5_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
         case GGML_TYPE_Q5_0:
-            set_rows_sycl_q<block_q5_0, QK5_0, cpy_blck_f32_q5_0>((const char *)src0->data, src1_dd, (block_q5_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_q5_0, QK5_0, cpy_blck_f32_q5_0>((const char *)src0->data, (const int64_t *)src1->data, (block_q5_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_q5_0, QK5_0, cpy_blck_f32_q5_0>((const char *)src0->data, (const int32_t *)src1->data, (block_q5_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
         case GGML_TYPE_Q4_1:
-            set_rows_sycl_q<block_q4_1, QK4_1, cpy_blck_f32_q4_1>((const char *)src0->data, src1_dd, (block_q4_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_q4_1, QK4_1, cpy_blck_f32_q4_1>((const char *)src0->data, (const int64_t *)src1->data, (block_q4_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_q4_1, QK4_1, cpy_blck_f32_q4_1>((const char *)src0->data, (const int32_t *)src1->data, (block_q4_1 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
         case GGML_TYPE_Q4_0:
-            set_rows_sycl_q<block_q4_0, QK4_0, cpy_blck_f32_q4_0>((const char *)src0->data, src1_dd, (block_q4_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_q4_0, QK4_0, cpy_blck_f32_q4_0>((const char *)src0->data, (const int64_t *)src1->data, (block_q4_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_q4_0, QK4_0, cpy_blck_f32_q4_0>((const char *)src0->data, (const int32_t *)src1->data, (block_q4_0 *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
         case GGML_TYPE_IQ4_NL:
-            set_rows_sycl_q<block_iq4_nl, QK4_NL, cpy_blck_f32_iq4_nl>((const char *)src0->data, src1_dd, (block_iq4_nl *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            if (src1->type == GGML_TYPE_I64) {
+                set_rows_sycl_q<int64_t, block_iq4_nl, QK4_NL, cpy_blck_f32_iq4_nl>((const char *)src0->data, (const int64_t *)src1->data, (block_iq4_nl *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            } else if (src1->type == GGML_TYPE_I32) {
+                set_rows_sycl_q<int32_t, block_iq4_nl, QK4_NL, cpy_blck_f32_iq4_nl>((const char *)src0->data, (const int32_t *)src1->data, (block_iq4_nl *)dst->data, ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nb00, nb01, nb02, nb03, nb10, nb11, nb12, nb13, nb1, nb2, nb3, stream);
+            }
             break;
 
         default:

@@ -161,7 +161,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     switch (dst->type) {
         case GGML_TYPE_F32:
             if (src1->type == GGML_TYPE_I64) {
-               set_rows_sycl<float, float>(
+               set_rows_sycl<float, int64_t, float>(
                     (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,
@@ -172,7 +172,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
                     stream
                 );
             } else if (src1->type == GGML_TYPE_I32) {
-               set_rows_sycl<float, float>(
+               set_rows_sycl<float, int32_t, float>(
                     (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,
@@ -187,7 +187,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
         case GGML_TYPE_F16:
             dpct::has_capability_or_fail(stream->get_device(), { sycl::aspect::fp16 });
             if (src1->type == GGML_TYPE_I64) {
-                set_rows_sycl<float, sycl::half>(
+                set_rows_sycl<float, int64_t, sycl::half>(
                     (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,
@@ -198,7 +198,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
                     stream
                 );
             } else if (src1->type == GGML_TYPE_I32) {
-                set_rows_sycl<float, sycl::half>(
+                set_rows_sycl<float, int32_t, sycl::half>(
                     (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,
@@ -212,7 +212,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
             break;
         case GGML_TYPE_BF16:
             if (src1->type == GGML_TYPE_I64) {
-                set_rows_sycl<float, sycl::ext::oneapi::bfloat16>(
+                set_rows_sycl<float, int64_t, sycl::ext::oneapi::bfloat16>(
                     (const char *)src0->data, (const int64_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,
@@ -223,7 +223,7 @@ void ggml_sycl_op_set_rows(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
                     stream
                 );
             } else if (src1->type == GGML_TYPE_I32) {
-                set_rows_sycl<float, sycl::ext::oneapi::bfloat16>(
+                set_rows_sycl<float, int32_t, sycl::ext::oneapi::bfloat16>(
                     (const char *)src0->data, (const int32_t *)src1->data, (char *)dst->data,
                     ne00, ne01, ne02, ne03,
                     ne11, ne12,

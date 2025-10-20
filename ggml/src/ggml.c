@@ -6989,11 +6989,9 @@ bool ggml_can_fuse_subgraph_ext(const struct ggml_cgraph * cgraph,
                                 const int *                node_idxs,
                                 int                        count,
                                 const enum ggml_op *       ops,
-                                const int *                inputs,
-                                int                        num_inputs,
                                 const int *                outputs,
                                 int                        num_outputs) {
-    GGML_ASSERT(count < 32 && num_inputs > 0 && num_outputs > 0);
+    GGML_ASSERT(count < 32 && outputs && num_outputs > 0);
     int interior_nodes_count = 0;
     int interior_nodes[32];
 
@@ -7008,10 +7006,6 @@ bool ggml_can_fuse_subgraph_ext(const struct ggml_cgraph * cgraph,
             return false;
         }
 
-        if (ggml_find_tensor_node_list(cgraph, inputs, num_inputs, node) != -1) {
-            continue;
-        }
-
         if (ggml_find_tensor_node_list(cgraph, outputs, num_outputs, node) != -1) {
             continue;
         }
@@ -7019,14 +7013,13 @@ bool ggml_can_fuse_subgraph_ext(const struct ggml_cgraph * cgraph,
         interior_nodes[interior_nodes_count++] = node_idxs[i];
     }
 
-    // if interior-node has n-uses, ensure that all of them lie within in this subgraph
     for (int i = 0; i < interior_nodes_count; ++i) {
         const int num_uses = ggml_node_get_use_count(cgraph, interior_nodes[i]);
 
         const struct ggml_tensor * node = cgraph->nodes[interior_nodes[i]];
 
+        // if interior-node has n-uses, ensure that all of them lie within in this subgraph
         int subgraph_uses = 0;
-        //check if all uses are within the graph
         for (int j = 0; j < count; ++j) {
             const struct ggml_tensor * other_node = cgraph->nodes[node_idxs[j]];
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; src_idx++) {
@@ -7038,6 +7031,14 @@ bool ggml_can_fuse_subgraph_ext(const struct ggml_cgraph * cgraph,
 
         if (subgraph_uses != num_uses) {
             return false;
+        }
+
+        // if node is a view, check if the view src is within the subgraph
+        if (node->view_src) {
+            const struct ggml_tensor * view_src = node->view_src;
+            if (ggml_find_tensor_node_list(cgraph, node_idxs, count, view_src) == -1) {
+                return false;
+            }
         }
     }
 

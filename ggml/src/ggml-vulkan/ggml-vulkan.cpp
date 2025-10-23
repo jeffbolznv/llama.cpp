@@ -11291,7 +11291,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
                 }
             }
         }
+
+#define ENABLE_SYNC_LOGGING 0
+
         if (need_sync) {
+#if ENABLE_SYNC_LOGGING
+            std::cerr <<  "sync" << std::endl;
+#endif
             ctx->unsynced_nodes_written.clear();
             ctx->unsynced_nodes_read.clear();
             ggml_vk_sync_buffers(ctx, compute_ctx);
@@ -11309,6 +11315,18 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
             }
         }
     }
+#if ENABLE_SYNC_LOGGING
+    if (!dryrun) {
+        for (int i = 0; i < ctx->num_additional_fused_ops + 1; ++i) {
+            auto *n = cgraph->nodes[node_idx + i];
+            std::cerr << node_idx + i << " " << ggml_op_name(n->op) << " " <<  n->name;
+            if (n->op == GGML_OP_GLU) {
+                std::cerr << " " << ggml_glu_op_name(ggml_get_glu_op(n)) << " " << (n->src[1] ? "split" : "single") << " ";
+            }
+            std::cerr << std::endl;
+        }
+    }
+#endif
 
     switch (node->op) {
     case GGML_OP_REPEAT:

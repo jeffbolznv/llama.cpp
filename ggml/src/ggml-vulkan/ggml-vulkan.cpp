@@ -387,22 +387,24 @@ static constexpr uint32_t num_topk_moe_pipelines = 10;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
-                                                                             GGML_OP_SUM_ROWS, GGML_OP_DIV,      GGML_OP_RESHAPE };
+                                                                             GGML_OP_SUM_ROWS, GGML_OP_CLAMP,    GGML_OP_DIV,
+                                                                             GGML_OP_RESHAPE };
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax     { GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS };
 static constexpr std::initializer_list<ggml_op> topk_moe_late_softmax      { GGML_OP_ARGSORT,  GGML_OP_VIEW,
                                                                              GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
                                                                              GGML_OP_SOFT_MAX, GGML_OP_RESHAPE };
 
-//node #963 (  SOFT_MAX):     ffn_moe_probs-15 (  64K) [Vulka         ] use=2:    ffn_moe_logits-15 (  64K) [Vulka         ]
-//node #964 (   RESHAPE): ffn_moe_probs-15 (re (  64K) [Vulka         ] use=1:     ffn_moe_probs-15 (  64K) [Vulka         ]
-//node #965 (   ARGSORT):   ffn_moe_argsort-15 (  64K) [Vulka         ] use=1:     ffn_moe_probs-15 (  64K) [Vulka         ]
-//node #966 (      VIEW):      ffn_moe_topk-15 (  63K) [Vulka         ] use=4:   ffn_moe_argsort-15 (  64K) [Vulka         ]
-//node #967 (  GET_ROWS):   ffn_moe_weights-15 (   4K) [Vulka         ] use=1: ffn_moe_probs-15 (re (  64K) [Vulka         ]      ffn_moe_topk-15 (  63K) [Vulka         ]
-//node #968 (   RESHAPE): ffn_moe_weights-15 ( (   4K) [Vulka         ] use=2:   ffn_moe_weights-15 (   4K) [Vulka         ]
-//node #969 (  SUM_ROWS): ffn_moe_weights_sum- (   0K) [Vulka         ] use=1: ffn_moe_weights-15 ( (   4K) [Vulka         ]
-//node #970 (       DIV): ffn_moe_weights_norm (   4K) [Vulka         ] use=1: ffn_moe_weights-15 ( (   4K) [Vulka         ] ffn_moe_weights_sum- (   0K) [Vulka         ]
-//node #971 (   RESHAPE): ffn_moe_weights_norm (   4K) [Vulka         ] use=1: ffn_moe_weights_norm (   4K) [Vulka         ]
+//node #978 (  SOFT_MAX):     ffn_moe_probs-15 (   0K) [Vulka         ] use=2:    ffn_moe_logits-15 (   0K) [Vulka         ]
+//node #979 (   RESHAPE): ffn_moe_probs-15 (re (   0K) [Vulka         ] use=1:     ffn_moe_probs-15 (   0K) [Vulka         ]
+//node #980 (   ARGSORT):   ffn_moe_argsort-15 (   0K) [Vulka         ] use=1:     ffn_moe_probs-15 (   0K) [Vulka         ]
+//node #981 (      VIEW):      ffn_moe_topk-15 (   0K) [Vulka         ] use=4:   ffn_moe_argsort-15 (   0K) [Vulka         ]
+//node #982 (  GET_ROWS):   ffn_moe_weights-15 (   0K) [Vulka         ] use=1: ffn_moe_probs-15 (re (   0K) [Vulka         ]      ffn_moe_topk-15 (   0K) [Vulka         ]
+//node #983 (   RESHAPE): ffn_moe_weights-15 ( (   0K) [Vulka         ] use=2:   ffn_moe_weights-15 (   0K) [Vulka         ]
+//node #984 (  SUM_ROWS): ffn_moe_weights_sum- (   0K) [Vulka         ] use=1: ffn_moe_weights-15 ( (   0K) [Vulka         ]
+//node #985 (     CLAMP): ffn_moe_weights_sum_ (   0K) [Vulka         ] use=1: ffn_moe_weights_sum- (   0K) [Vulka         ]
+//node #986 (       DIV): ffn_moe_weights_norm (   0K) [Vulka         ] use=1: ffn_moe_weights-15 ( (   0K) [Vulka         ] ffn_moe_weights_sum_ (   0K) [Vulka         ]
+//node #987 (   RESHAPE): ffn_moe_weights_norm (   0K) [Vulka         ] use=1: ffn_moe_weights_norm (   0K) [Vulka         ]
 static constexpr std::initializer_list<std::array<int, 3>> topk_moe_early_softmax_norm_edges {
     { 1, 0, 0 }, // reshape->src[0]  == softmax
     { 2, 0, 0 }, // argsort->src[0]  == softmax
@@ -411,9 +413,10 @@ static constexpr std::initializer_list<std::array<int, 3>> topk_moe_early_softma
     { 4, 1, 3 }, // get_rows->src[1] == view
     { 5, 0, 4 }, // reshape->src[0]  == get_rows
     { 6, 0, 5 }, // sum_rows->src[0] == reshape
-    { 7, 0, 5 }, // div->src[0]      == reshape
-    { 7, 1, 6 }, // div->src[1]      == sum_rows
-    { 8, 0, 7 }, // reshape->src[0]  == div
+    { 7, 0, 6 }, // clamp->src[0]    == sum_rows
+    { 8, 0, 5 }, // div->src[0]      == reshape
+    { 8, 1, 7 }, // div->src[1]      == clamp
+    { 9, 0, 8 }, // reshape->src[0]  == div
 };
 
 // same as early_softmax_norm but ending after the get_rows
@@ -1013,6 +1016,8 @@ static_assert(sizeof(vk_op_multi_add_push_constants) <= 256);
 struct vk_op_topk_moe_push_constants {
     uint32_t n_rows;
     uint32_t n_expert_used;
+    float clamp_min;
+    float clamp_max;
 };
 
 struct vk_op_add_id_push_constants {
@@ -9632,7 +9637,7 @@ static void ggml_vk_topk_moe(ggml_backend_vk_context * ctx, vk_context& subctx, 
 
     topk_moe_mode mode = ggml_vk_num_additional_ops_to_topk_moe_mode(ctx->num_additional_fused_ops);
     ggml_tensor * logits = cgraph->nodes[node_idx + 0]->src[0];
-    ggml_tensor * weights = (mode == TOPK_MOE_EARLY_SOFTMAX_NORM) ? cgraph->nodes[node_idx + 8] :
+    ggml_tensor * weights = (mode == TOPK_MOE_EARLY_SOFTMAX_NORM) ? cgraph->nodes[node_idx + 9] :
                             (mode == TOPK_MOE_EARLY_SOFTMAX)      ? cgraph->nodes[node_idx + 4] :
                                                                     cgraph->nodes[node_idx + 5];
     ggml_tensor * ids = (mode == TOPK_MOE_LATE_SOFTMAX) ? cgraph->nodes[node_idx + 1] : cgraph->nodes[node_idx + 3];
@@ -9694,9 +9699,14 @@ static void ggml_vk_topk_moe(ggml_backend_vk_context * ctx, vk_context& subctx, 
         GGML_ASSERT(d_ids != nullptr);
     }
 
-    vk_op_topk_moe_push_constants pc;
+    vk_op_topk_moe_push_constants pc {};
     pc.n_rows = n_rows;
     pc.n_expert_used = n_expert_used;
+    if (mode == TOPK_MOE_EARLY_SOFTMAX_NORM) {
+        ggml_tensor * clamp = cgraph->nodes[node_idx + 7];
+        pc.clamp_min = ggml_get_op_params_f32(clamp, 0);
+        pc.clamp_max = ggml_get_op_params_f32(clamp, 1);
+    }
 
     GGML_ASSERT(n_expert_used <= n_experts);
 
@@ -12290,7 +12300,7 @@ static bool ggml_vk_can_fuse_topk_moe(ggml_backend_vk_context * ctx, const struc
     switch (mode) {
     case TOPK_MOE_EARLY_SOFTMAX_NORM:
         softmax = cgraph->nodes[node_idx + 0];
-        weights = cgraph->nodes[node_idx + 8];
+        weights = cgraph->nodes[node_idx + 9];
         break;
     case TOPK_MOE_EARLY_SOFTMAX:
         softmax = cgraph->nodes[node_idx + 0];
@@ -12413,7 +12423,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->num_additional_fused_ops = num_adds - 1;
             } else if (ggml_vk_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
                 ctx->num_additional_fused_ops = 1;
-            } else if (ggml_can_fuse_subgraph(cgraph, i, topk_moe_early_softmax_norm, { i + 3, i + 8 }) &&
+            } else if (ggml_can_fuse_subgraph(cgraph, i, topk_moe_early_softmax_norm, { i + 3, i + 9 }) &&
                        ggml_check_edges(cgraph, i, topk_moe_early_softmax_norm_edges) &&
                        ggml_vk_can_fuse_topk_moe(ctx, cgraph, i, TOPK_MOE_EARLY_SOFTMAX_NORM)) {
                 ctx->num_additional_fused_ops = topk_moe_early_softmax_norm.size() - 1;
@@ -12522,7 +12532,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->num_additional_fused_ops = num_adds - 1;
             } else if (ggml_vk_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
                 ctx->num_additional_fused_ops = 1;
-            } else if (ggml_can_fuse_subgraph(cgraph, i, topk_moe_early_softmax_norm, { i + 3, i + 8 }) &&
+            } else if (ggml_can_fuse_subgraph(cgraph, i, topk_moe_early_softmax_norm, { i + 3, i + 9 }) &&
                        ggml_check_edges(cgraph, i, topk_moe_early_softmax_norm_edges) &&
                        ggml_vk_can_fuse_topk_moe(ctx, cgraph, i, TOPK_MOE_EARLY_SOFTMAX_NORM)) {
                 ctx->num_additional_fused_ops = topk_moe_early_softmax_norm.size() - 1;
@@ -12696,6 +12706,9 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * 
         if (keep_pattern(topk_moe_early_softmax_norm)) {
             continue;
         }
+        if (keep_pattern(topk_moe_early_softmax)) {
+            continue;
+        }
         if (keep_pattern(topk_moe_late_softmax)) {
             continue;
         }
@@ -12718,7 +12731,9 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * 
                 continue;
             }
             // Don't pull forward nodes from fusion patterns
-            if (match_pattern(topk_moe_early_softmax_norm, j) || match_pattern(topk_moe_late_softmax, j)) {
+            if (match_pattern(topk_moe_early_softmax_norm, j) ||
+                match_pattern(topk_moe_early_softmax, j) ||
+                match_pattern(topk_moe_late_softmax, j)) {
                 continue;
             }
             bool ok = true;

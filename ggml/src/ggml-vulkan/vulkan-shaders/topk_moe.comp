@@ -11,6 +11,8 @@ layout (push_constant) uniform parameter
 {
     uint n_rows;
     uint n_expert_used;
+    float clamp_min;
+    float clamp_max;
 };
 
 layout(local_size_x_id = 0, local_size_y = 4, local_size_z = 1) in;
@@ -146,6 +148,7 @@ void main() {
 
     if (with_norm) {
         wt_sum              = subgroupAdd(wt_sum);
+        wt_sum              = clamp(wt_sum, clamp_min, clamp_max);
         const float inv_sum = 1.0f / wt_sum;
 
         [[unroll]]

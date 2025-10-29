@@ -702,7 +702,7 @@ inline bool ggml_can_fuse_subgraph(const struct ggml_cgraph *          cgraph,
 inline bool ggml_check_edges(const struct ggml_cgraph *                cgraph,
                              int                                       start_idx,
                              std::initializer_list<std::array<int, 3>> edges) {
-    for (const auto &edge : edges) {
+    for (const auto & edge : edges) {
         int dst_node = edge[0];
         int src_idx  = edge[1];
         int src_node = edge[2];

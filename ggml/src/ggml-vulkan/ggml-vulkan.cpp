@@ -6756,7 +6756,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     uint32_t enable_bias = ctx->num_additional_fused_ops > 0;
 
     vk_buffer d_B = d_D;
-    uint64_t b_buf_offset = 0;
+    size_t b_buf_offset = 0;
     uint64_t b_sz = 0;
 
     if (enable_bias) {
@@ -6891,7 +6891,7 @@ static void ggml_vk_mul_mat_vec_p021_f16_f32(ggml_backend_vk_context * ctx, vk_c
     uint32_t enable_bias = ctx->num_additional_fused_ops > 0;
 
     vk_buffer d_B = d_D;
-    uint64_t b_buf_offset = 0;
+    size_t b_buf_offset = 0;
     uint64_t b_sz = 0;
 
     if (enable_bias) {
@@ -7028,7 +7028,7 @@ static void ggml_vk_mul_mat_vec_nc_f16_f32(ggml_backend_vk_context * ctx, vk_con
     uint32_t enable_bias = ctx->num_additional_fused_ops > 0;
 
     vk_buffer d_B = d_D;
-    uint64_t b_buf_offset = 0;
+    size_t b_buf_offset = 0;
     uint64_t b_sz = 0;
 
     if (enable_bias) {
@@ -7604,7 +7604,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     uint32_t enable_bias = ctx->num_additional_fused_ops > 0;
 
     vk_buffer d_B = d_D;
-    uint64_t b_buf_offset = 0;
+    size_t b_buf_offset = 0;
     uint64_t b_sz = 0;
 
     if (enable_bias) {

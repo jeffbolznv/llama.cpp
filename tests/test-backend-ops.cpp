@@ -3568,9 +3568,10 @@ struct test_mul_mat_id : public test_case {
     const int64_t n;
     const int64_t k;
     const uint32_t o; // number of outputs
+    const bool mul;
 
     std::string vars() override {
-        return VARS_TO_STR9(type_a, type_b, n_mats, n_used, b, m, n, k, o);
+        return VARS_TO_STR10(type_a, type_b, n_mats, n_used, b, m, n, k, o, mul);
     }
 
     double max_nmse_err() override {
@@ -3584,9 +3585,9 @@ struct test_mul_mat_id : public test_case {
 
     test_mul_mat_id(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
             int n_mats = 8, int n_used = 2, bool b = false,
-            int64_t m = 32, int64_t n = 32, int64_t k = 32, uint32_t o = 1)
+            int64_t m = 32, int64_t n = 32, int64_t k = 32, uint32_t o = 1, bool mul = false)
         : type_a(type_a), type_b(type_b), n_mats(n_mats), n_used(n_used), b(b),
-            m(m), n(n), k(k), o(o) {
+            m(m), n(n), k(k), o(o), mul(mul) {
             GGML_ASSERT(n_used <= n_mats);
         }
 
@@ -3615,6 +3616,13 @@ struct test_mul_mat_id : public test_case {
             out = ggml_add(ctx, out, out2);
         }
 
+        if (mul) {
+            std::array<int64_t, 4> ne { 1, out->ne[1], out->ne[2], out->ne[3] };
+            ne[0] = 1;
+            ggml_tensor * m = ggml_new_tensor(ctx, out->type, 4, ne.data());
+            out = ggml_mul(ctx, out, m);
+        }
+
         return out;
     }
 
@@ -3639,7 +3647,7 @@ struct test_mul_mat_id : public test_case {
         }
     }
 
-    bool run_whole_graph() override { return o > 1; }
+    bool run_whole_graph() override { return o > 1 || mul; }
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -7012,6 +7020,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    for (int bs : {1, 4, 512}) {
+        for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K}) {
+            for (ggml_type type_b : {GGML_TYPE_F32}) {
+                // test with mul after (ffn_moe_weighted)
+                test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 128, 8, false, 768, bs, 2048, 1, true));
             }
         }
     }

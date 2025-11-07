@@ -7,6 +7,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
 
 #extension GL_KHR_shader_subgroup_shuffle : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
 
 #include "types.glsl"
 #include "flash_attn_base.glsl"
@@ -40,6 +41,7 @@ shared vec4 tmpshv4[WorkGroupSize];
 
 shared float masksh[Bc][Br];
 shared vec4 Qf[Br][HSK / 4];
+shared float maskmax[WorkGroupSize];
 
 void main() {
 #ifdef NEEDS_INIT_IQ_SHMEM
@@ -108,6 +110,36 @@ void main() {
     [[dont_unroll]]
     for (uint32_t j = start_j; j < end_j; ++j) {
 
+        if ((p.mask_n_head_log2 & MASK_ENABLE_BIT) != 0) {
+            bool nem1_bounds_check = !(p.gqa_ratio > 1) && (p.nem1 % Br) != 0;
+
+            float mm = -1.0/0.0;
+            [[unroll]] for (uint32_t idx = 0; idx < Bc * Br; idx += gl_WorkGroupSize.x) {
+                uint32_t c = (idx + tid) % Bc;
+                uint32_t r = (idx + tid) / Bc;
+                if (idx + tid < Bc * Br) {
+                    if ((!KV_bounds_check || j * Bc + c < KV) && (!nem1_bounds_check || i * Br + r < p.nem1)) {
+                        float f = float(data_m[m_offset + (i * Br + r) * m_stride + (j * Bc + c)]);
+                        masksh[c][r] = f;
+                        mm = max(mm, f);
+                    } else {
+                        masksh[c][r] = float(0);
+                    }
+                }
+            }
+            mm = subgroupMax(mm);
+            if (gl_SubgroupInvocationID == 0) {
+                maskmax[gl_SubgroupID] = mm;
+            }
+            barrier();
+            for (uint s = 0; s < gl_NumSubgroups; ++s) {
+                mm = max(mm, maskmax[s]);
+            }
+            if (mm <= NEG_FLT_MAX_OVER_2) {
+                continue;
+            }
+        }
+
         float Sf[Br][cols_per_thread];
         [[unroll]] for (uint32_t r = 0; r < Br; ++r) {
             [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
@@ -153,21 +185,6 @@ void main() {
         }
 
         if ((p.mask_n_head_log2 & MASK_ENABLE_BIT) != 0) {
-            bool nem1_bounds_check = !(p.gqa_ratio > 1) && (p.nem1 % Br) != 0;
-
-            [[unroll]] for (uint32_t idx = 0; idx < Bc * Br; idx += gl_WorkGroupSize.x) {
-                uint32_t c = (idx + tid) % Bc;
-                uint32_t r = (idx + tid) / Bc;
-                if (idx + tid < Bc * Br) {
-                    if ((!KV_bounds_check || j * Bc + c < KV) && (!nem1_bounds_check || i * Br + r < p.nem1)) {
-                        masksh[c][r] = float(data_m[m_offset + (i * Br + r) * m_stride + (j * Bc + c)]);
-                    } else {
-                        masksh[c][r] = float(0);
-                    }
-                }
-            }
-            barrier();
-
             [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
                 [[unroll]] for (uint32_t r = 0; r < Br; ++r) {
                     float mvf = masksh[c * cols_per_iter + col_tid][r];

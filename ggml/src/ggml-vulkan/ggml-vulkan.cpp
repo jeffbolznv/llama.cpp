@@ -8597,11 +8597,14 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
 
             vk_pipeline pipeline = nullptr;
 
-            auto it = pipelines->find(conv2d_pipeline_state);
-            if (it != pipelines->end()) {
-                pipeline = it->second;
-            } else {
-                (*pipelines)[conv2d_pipeline_state] = pipeline = std::make_shared<vk_pipeline_struct>();
+            {
+                std::lock_guard<std::recursive_mutex> guard(ctx->device->mutex);
+                auto it = pipelines->find(conv2d_pipeline_state);
+                if (it != pipelines->end()) {
+                    pipeline = it->second;
+                } else {
+                    (*pipelines)[conv2d_pipeline_state] = pipeline = std::make_shared<vk_pipeline_struct>();
+                }
             }
 
             return pipeline;

@@ -12002,6 +12002,11 @@ static void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx) {
 // Clean up on backend free
 static void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
     VK_LOG_DEBUG("ggml_vk_cleanup(" << ctx->name << ")");
+    // discard any unsubmitted command buffers
+    ctx->transfer_ctx.reset();
+    // wait for any pending command buffers to finish
+    ggml_vk_synchronize(ctx);
+
     ggml_vk_graph_cleanup(ctx);
 
     ggml_vk_destroy_buffer(ctx->prealloc_x);

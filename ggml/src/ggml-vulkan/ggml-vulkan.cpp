@@ -12384,7 +12384,10 @@ static void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
     }
 
     if (ctx->submit_pending) {
-        ctx->device->compute_queue.queue.submit({}, ctx->fence);
+        {
+            std::lock_guard<std::mutex> guard(queue_mutex);
+            ctx->device->compute_queue.queue.submit({}, ctx->fence);
+        }
         ggml_vk_wait_for_fence(ctx);
         ctx->submit_pending = false;
     }

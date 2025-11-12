@@ -76,6 +76,37 @@ enum MatMulIdType {
 
 namespace {
 
+static std::vector<std::string> split_command(const std::string &cmd) {
+    std::vector<std::string> parts;
+    std::string cur;
+    bool in_single = false;
+    bool in_double = false;
+
+    for (const char c : cmd) {
+        if (c == '\'' && !in_double) {
+            in_single = !in_single;
+            continue;
+        }
+        if (c == '"' && !in_single) {
+            in_double = !in_double;
+            continue;
+        }
+        if (!in_single && !in_double && std::isspace(c)) {
+            if (!cur.empty()) {
+                parts.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) {
+        parts.push_back(cur);
+    }
+
+    return parts;
+}
+
 void execute_command(const std::string& command, std::string& stdout_str, std::string& stderr_str) {
 #ifdef _WIN32
     HANDLE stdout_read, stdout_write;
@@ -138,6 +169,14 @@ void execute_command(const std::string& command, std::string& stdout_str, std::s
         throw std::runtime_error("Failed to fork process");
     }
 
+    const std::vector<std::string> cmd_parts = split_command(command);
+
+    std::vector<char*> argv;
+    for (const auto& part : cmd_parts) {
+        argv.push_back(const_cast<char*>(part.c_str()));
+    }
+    argv.push_back(nullptr);
+
     if (pid == 0) {
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
@@ -145,7 +184,7 @@ void execute_command(const std::string& command, std::string& stdout_str, std::s
         dup2(stderr_pipe[1], STDERR_FILENO);
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
-        execl("/bin/sh", "sh", "-c", command.c_str(), (char*) nullptr);
+        execvp(argv[0], argv.data());
         _exit(EXIT_FAILURE);
     } else {
         close(stdout_pipe[1]);
@@ -1081,11 +1120,6 @@ int main(int argc, char** argv) {
 
     if (args.find("--glslc") != args.end()) {
         GLSLC = args["--glslc"]; // Path to glslc
-
-        if (!std::filesystem::exists(GLSLC) || !std::filesystem::is_regular_file(GLSLC)) {
-            std::cerr << "Error: glslc not found at " << GLSLC << std::endl;
-            return EXIT_FAILURE;
-        }
     }
     if (args.find("--source") != args.end()) {
         input_filepath = args["--source"]; // The shader source file to compile

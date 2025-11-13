@@ -6919,9 +6919,9 @@ static void ggml_vk_mul_mat_vec_p021_f16_f32(ggml_backend_vk_context * ctx, vk_c
         ggml_pipeline_request_descriptor_sets(ctx, ctx->device->pipeline_mul_mat_vec_p021_f16_f32[gqa_ratio - 1], 1);
     }
 
-    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + ctx->num_additional_fused_ops]);
+    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + ctx->num_additional_fused_ops], true);
     vk_subbuffer d_Qx = ggml_vk_tensor_subbuffer(ctx, src0);
-    vk_subbuffer d_Qy = ggml_vk_tensor_subbuffer(ctx, src1);
+    vk_subbuffer d_Qy = ggml_vk_tensor_subbuffer(ctx, src1, true);
 
     vk_subbuffer d_B = d_D;
 
@@ -7003,9 +7003,9 @@ static void ggml_vk_mul_mat_vec_nc_f16_f32(ggml_backend_vk_context * ctx, vk_con
         ggml_pipeline_request_descriptor_sets(ctx, ctx->device->pipeline_mul_mat_vec_nc_f16_f32, 1);
     }
 
-    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + ctx->num_additional_fused_ops]);
+    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + ctx->num_additional_fused_ops], true);
     vk_subbuffer d_Qx = ggml_vk_tensor_subbuffer(ctx, src0);
-    vk_subbuffer d_Qy = ggml_vk_tensor_subbuffer(ctx, src1);
+    vk_subbuffer d_Qy = ggml_vk_tensor_subbuffer(ctx, src1, true);
     vk_subbuffer d_B = d_D;
 
     uint32_t enable_bias = ctx->num_additional_fused_ops > 0;

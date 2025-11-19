@@ -4,8 +4,7 @@
 #include "types.glsl"
 
 layout(constant_id = 0) const int BLOCK_SIZE = 1024;
-layout(constant_id = 1) const int NCOLS_PADDED = 1024;
-layout(constant_id = 2) const int NCOLS_PADDED_LOG2 = 10;
+layout(constant_id = 1) const int NCOLS_PADDED_LOG2 = 10;
 #define ASC 0
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
@@ -15,6 +14,8 @@ layout (binding = 2) writeonly buffer D {int data_d[];};
 
 layout (push_constant) uniform parameter {
     uint ncols;
+    uint ncols_padded;
+    uint ncols_padded_log2;
     uint nrows;
     uint order;
     uint outer_start;

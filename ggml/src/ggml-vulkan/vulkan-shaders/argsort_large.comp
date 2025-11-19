@@ -6,8 +6,6 @@
 #include "types.glsl"
 
 layout(constant_id = 0) const int BLOCK_SIZE = 1024;
-layout(constant_id = 1) const int NCOLS_PADDED = 1024;
-layout(constant_id = 2) const int NCOLS_PADDED_LOG2 = 10;
 #define ASC 0
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
@@ -18,6 +16,8 @@ layout (binding = 2) workgroupcoherent buffer D {int data_d[];};
 
 layout (push_constant) uniform parameter {
     uint ncols;
+    uint ncols_padded;
+    uint ncols_padded_log2;
     uint nrows;
     uint order;
     uint outer_start;
@@ -31,13 +31,13 @@ void argsort(bool needs_bounds_check, const uint row) {
     const int col = int(gl_GlobalInvocationID.x);
 
     const uint row_offset = row * p.ncols;
-    uint idx_offset = row * NCOLS_PADDED;
+    uint idx_offset = row * p.ncols_padded;
 
     bool need_barrier = false;
 
     // initialize indices
     if (p.outer_start == 0 && p.inner_start == 0) {
-        if (col < NCOLS_PADDED) {
+        if (col < p.ncols_padded) {
             ivec2 v = ivec2(col, floatBitsToInt(data_a[row_offset + col]));
             tmp_idx[idx_offset + col] = v;
         }
@@ -77,8 +77,8 @@ void argsort(bool needs_bounds_check, const uint row) {
         }
     }
 
-    if (p.outer_end == NCOLS_PADDED_LOG2 &&
-        p.inner_end >= NCOLS_PADDED_LOG2+1) {
+    if (p.outer_end == p.ncols_padded_log2 &&
+        p.inner_end >= p.ncols_padded_log2 + 1) {
         controlBarrier(gl_ScopeWorkgroup, gl_ScopeWorkgroup, gl_StorageSemanticsBuffer, gl_SemanticsAcquireRelease);
         if (col < p.ncols) {
             int c = col;
@@ -92,7 +92,7 @@ void argsort(bool needs_bounds_check, const uint row) {
 }
 
 void main() {
-    if (p.ncols == NCOLS_PADDED) {
+    if (p.ncols == p.ncols_padded) {
         uint row = gl_WorkGroupID.y;
         while (row < p.nrows) {
             argsort(false, row);

@@ -406,9 +406,8 @@ enum shader_reduction_mode {
     SHADER_REDUCTION_MODE_COUNT,
 };
 
-// Arbitrary limit for argsort size (about a million columns).
-static constexpr uint32_t num_argsort_pipelines = 21;
-static constexpr uint32_t max_argsort_cols = 1 << (num_argsort_pipelines-1);
+// argsort pipelines for up to 1<<10 invocations per workgroup
+static constexpr uint32_t num_argsort_pipelines = 11;
 static constexpr uint32_t num_topk_moe_pipelines = 10;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
@@ -1179,6 +1178,8 @@ struct vk_op_soft_max_push_constants {
 
 struct vk_op_argsort_push_constants {
     uint32_t ncols;
+    uint32_t ncols_padded;
+    uint32_t ncols_padded_log2;
     uint32_t nrows;
     uint32_t order;
     uint32_t outer_start;
@@ -3902,13 +3903,12 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     for (uint32_t i = 0; i < num_argsort_pipelines; ++i) {
         const uint32_t BLOCK_SIZE = 1u << std::min(i, device->max_workgroup_size_log2);
-        const uint32_t NCOLS_PADDED = 1u << i;
-        const uint32_t NCOLS_PADDED_LOG2 = i;
         if (i <= device->max_workgroup_size_log2 &&
             2 * sizeof(int) * BLOCK_SIZE <= device->properties.limits.maxComputeSharedMemorySize) {
-            ggml_vk_create_pipeline2(device, device->pipeline_argsort_f32[i], "argsort_f32_"+std::to_string(i), argsort_f32_len, argsort_f32_data, "main", 3, sizeof(vk_op_argsort_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED, NCOLS_PADDED_LOG2}, 1, true);
+            const uint32_t NCOLS_PADDED_LOG2 = i;
+            ggml_vk_create_pipeline2(device, device->pipeline_argsort_f32[i], "argsort_f32_"+std::to_string(i), argsort_f32_len, argsort_f32_data, "main", 3, sizeof(vk_op_argsort_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED_LOG2}, 1, true);
         }
-        ggml_vk_create_pipeline2(device, device->pipeline_argsort_large_f32[i], "argsort_large_f32_"+std::to_string(i), argsort_large_f32_len, argsort_large_f32_data, "main", 3, sizeof(vk_op_argsort_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED, NCOLS_PADDED_LOG2}, 1, true);
+        ggml_vk_create_pipeline2(device, device->pipeline_argsort_large_f32[i], "argsort_large_f32_"+std::to_string(i), argsort_large_f32_len, argsort_large_f32_data, "main", 3, sizeof(vk_op_argsort_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE}, 1, true);
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_argmax_f32, "argmax_f32", argmax_f32_len, argmax_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
@@ -9879,13 +9879,17 @@ static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, c
     uint32_t ncols_pad_log2 = (uint32_t)ceilf(log2f(float(ncols)));
     uint32_t ncolsp2 = 1 << ncols_pad_log2;
 
-    vk_op_argsort_push_constants pc { ncols, nrows, op_params[0], 0, 0, 0, 0, };
+    vk_op_argsort_push_constants pc { ncols, ncolsp2, ncols_pad_log2, nrows, op_params[0], 0, 0, 0, 0, };
+
+    // Pick the largest workgroup size <= ncolsp2
+    uint32_t pipeline_idx = std::min(ncols_pad_log2, num_argsort_pipelines - 1);
 
     // Use the "small" argsort shader if the whole sort can be done by a single workgroup.
-    bool use_small = ctx->device->pipeline_argsort_f32[ncols_pad_log2] != nullptr;
+    bool use_small = ncols_pad_log2 <= ctx->device->max_workgroup_size_log2 &&
+                     ctx->device->pipeline_argsort_f32[pipeline_idx] != nullptr;
 
-    vk_pipeline pipeline = use_small ? ctx->device->pipeline_argsort_f32[ncols_pad_log2]
-                                     : ctx->device->pipeline_argsort_large_f32[ncols_pad_log2];
+    vk_pipeline pipeline = use_small ? ctx->device->pipeline_argsort_f32[pipeline_idx]
+                                     : ctx->device->pipeline_argsort_large_f32[pipeline_idx];
 
     vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0);
     vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
@@ -9935,9 +9939,13 @@ static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, c
                 // When the inner idx is large enough, there's only communication
                 // within a workgroup. So the remaining inner iterations can all
                 // run in the same dispatch.
-                if (outer - inner < ctx->device->max_workgroup_size_log2) {
+                if (outer - inner < pipeline_idx) {
                     pc2.inner_end = 100;
                     inner = outer;
+                    pipeline = ctx->device->pipeline_argsort_large_f32[pipeline_idx];
+                } else {
+                    // Smaller workgroup empirically seems to perform better
+                    pipeline = ctx->device->pipeline_argsort_large_f32[pipeline_idx - 2];
                 }
                 ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
                 ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src0_buf, subbuf1, dst_buf }, pc2, elements);
@@ -13772,8 +13780,9 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 }
                 ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
                 auto device = ggml_vk_get_device(ctx->device);
+                // pipeline_argsort_large_f32 requires vulkan memory model.
                 if (device->vulkan_memory_model) {
-                    return op->ne[0] <= max_argsort_cols;
+                    return true;
                 } else {
                     return op->ne[0] <= (1 << device->max_workgroup_size_log2);
                 }

@@ -4224,9 +4224,16 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->driver_id = driver_props.driverID;
 
         // Implementing the async backend interfaces seems broken on older Intel HW,
-        // see https://github.com/ggml-org/llama.cpp/issues/17302
-        device->support_async = (device->vendor_id != VK_VENDOR_ID_INTEL || device->architecture == vk_device_architecture::INTEL_XE2) &&
+        // see https://github.com/ggml-org/llama.cpp/issues/17302. Using
+        // maxComputeWorkgroupSubgroups to try to detect DG1.
+        device->support_async = (device->vendor_id != VK_VENDOR_ID_INTEL ||
+                                 device->architecture == vk_device_architecture::INTEL_XE2 ||
+                                 subgroup_size_control_props.maxComputeWorkgroupSubgroups != 64) &&
                                 getenv("GGML_VK_DISABLE_ASYNC") == nullptr;
+
+        if (!device->support_async) {
+            GGML_LOG_DEBUG("ggml_vulkan: WARNING: Async execution disabled on certain Intel devices.\n");
+        }
 
         const char* GGML_VK_FORCE_MAX_ALLOCATION_SIZE = getenv("GGML_VK_FORCE_MAX_ALLOCATION_SIZE");
 

@@ -10190,7 +10190,7 @@ static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, cons
         // Prefer going as small as num_topk_pipelines - 3 for perf reasons.
         // But if K is larger, then we need a larger workgroup
         uint32_t max_pipeline = num_topk_pipelines - 3;
-        uint32_t min_pipeline = (uint32_t)ceilf(log2f(float(k)));
+        uint32_t min_pipeline = (uint32_t)log2f(float(k)) + 1;
 
         uint32_t pipeline_idx = (uint32_t)ceilf(log2f(float(num_elements)));
         pipeline_idx = std::min(pipeline_idx, max_pipeline);
@@ -13885,7 +13885,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 auto device = ggml_vk_get_device(ctx->device);
                 // We could potentially support larger, using argsort to sort the
                 // whole thing. Not clear if this is needed.
-                uint32_t min_pipeline = (uint32_t)ceilf(log2f(float(op->ne[0])));
+                uint32_t min_pipeline = (uint32_t)log2f(float(op->ne[0])) + 1;
                 if (min_pipeline >= num_topk_pipelines ||
                     !device->pipeline_topk_f32[min_pipeline]) {
                     return false;

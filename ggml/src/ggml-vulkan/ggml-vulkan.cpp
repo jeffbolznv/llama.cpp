@@ -516,6 +516,7 @@ struct vk_device_struct {
     bool single_queue;
     bool support_async;
     uint32_t subgroup_size;
+    uint32_t subgroup_size_log2;
     uint32_t shader_core_count;
     bool uma;
     bool prefer_host_memory;
@@ -3978,9 +3979,17 @@ static void ggml_vk_load_shaders(vk_device& device) {
     for (uint32_t i = 0; i < num_topk_pipelines; ++i) {
         const uint32_t BLOCK_SIZE = 1u << i;
         const uint32_t NCOLS_PADDED_LOG2 = i;
-        if (i <= device->max_workgroup_size_log2 &&
-            2 * sizeof(int) * BLOCK_SIZE <= device->properties.limits.maxComputeSharedMemorySize) {
-            ggml_vk_create_pipeline2(device, device->pipeline_topk_f32[i], "topk_f32_"+std::to_string(i), topk_f32_len, topk_f32_data, "main", 2, sizeof(vk_op_topk_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED_LOG2}, 1, true);
+        if (i <= device->max_workgroup_size_log2) {
+            uint32_t nary_shmem = 2 * sizeof(int) * BLOCK_SIZE +
+                                  sizeof(int) * device->subgroup_size +
+                                  2 * sizeof(int) +
+                                  (BLOCK_SIZE / device->subgroup_size) * sizeof(int);
+            if (device->subgroup_arithmetic && device->subgroup_require_full_support && device->subgroup_shuffle && device->subgroup_ballot &&
+                nary_shmem <= device->properties.limits.maxComputeSharedMemorySize) {
+                ggml_vk_create_pipeline2(device, device->pipeline_topk_f32[i], "topk_f32_"+std::to_string(i), topk_nary_search_f32_len, topk_nary_search_f32_data, "main", 2, sizeof(vk_op_topk_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, device->subgroup_size, device->subgroup_size_log2}, 1, true, true, device->subgroup_size);
+            } else if (2 * sizeof(int) * BLOCK_SIZE <= device->properties.limits.maxComputeSharedMemorySize) {
+                ggml_vk_create_pipeline2(device, device->pipeline_topk_f32[i], "topk_f32_"+std::to_string(i), topk_argsort_f32_len, topk_argsort_f32_data, "main", 2, sizeof(vk_op_topk_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED_LOG2}, 1, true);
+            }
         }
     }
 
@@ -4353,6 +4362,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->suballocation_block_size = std::min(device->suballocation_block_size, device->max_memory_allocation_size);
 
         device->subgroup_size = subgroup_props.subgroupSize;
+        device->subgroup_size_log2 = uint32_t(log2f(float(device->subgroup_size)));
         device->uma = device->properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu;
         if (sm_builtins) {
             device->shader_core_count = sm_props.shaderSMCount;
@@ -10191,6 +10201,8 @@ static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, cons
         // But if K is larger, then we need a larger workgroup
         uint32_t max_pipeline = num_topk_pipelines - 3;
         uint32_t min_pipeline = (uint32_t)log2f(float(k)) + 1;
+        // require full subgroup
+        min_pipeline = std::max(min_pipeline, ctx->device->subgroup_size_log2);
 
         uint32_t pipeline_idx = (uint32_t)ceilf(log2f(float(num_elements)));
         pipeline_idx = std::min(pipeline_idx, max_pipeline);

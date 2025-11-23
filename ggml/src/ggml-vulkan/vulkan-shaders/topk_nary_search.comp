@@ -126,19 +126,17 @@ void topk(const uint row) {
                 uint partial_sum = counts[SUBGROUP_SIZE - 1 - tid];
                 partial_sum = subgroupInclusiveAdd(partial_sum) + total;
                 uint t = subgroupBallotFindLSB(subgroupBallot(partial_sum >= limit));
-                int min_idx = int(SUBGROUP_SIZE - 1 - t);
-                total = subgroupShuffle(partial_sum, t);
-                sh_min_idx = min_idx;
-                sh_total = total;
+                if (tid == t) {
+                    sh_min_idx = int(SUBGROUP_SIZE - 1 - t);
+                    sh_total = partial_sum;
+                }
             }
             barrier();
             int min_idx = sh_min_idx;
             total = sh_total;
 
             // Update the range, and break if we've found the K-th largest.
-            if (min_idx != SUBGROUP_SIZE - 1) {
-                range_max = range_min + ((min_idx + 1) << shift);
-            }
+            range_max = range_min + ((min_idx + 1) << shift);
             range_min = range_min + (min_idx << shift);
 
             if (total == p.ncols_output) {

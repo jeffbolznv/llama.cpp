@@ -10208,6 +10208,17 @@ static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, cons
         pipeline_idx = std::min(pipeline_idx, max_pipeline);
         pipeline_idx = std::max(pipeline_idx, min_pipeline);
 
+        if (num_elements > (1u << pipeline_idx)) {
+            // If we could finish on this loop iteration (i.e. a single workgroup)
+            // then do so. It's better than the overhead of another pass.
+            for (uint32_t i = pipeline_idx; i < num_topk_pipelines; ++i) {
+                if (num_elements <= (1u << i)) {
+                    pipeline_idx = i;
+                    break;
+                }
+            }
+        }
+
         vk_pipeline pipeline = ctx->device->pipeline_topk_f32[pipeline_idx];
         // If the device doesn't support a pipeline this large, use smaller
         while (!pipeline) {
@@ -10242,9 +10253,11 @@ static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, cons
 
         ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc2, elements);
-        ggml_vk_sync_buffers(ctx, subctx);
         num_elements = num_dst_elements;
         dbl_buf_index ^= 1;
+        if (num_elements > k) {
+            ggml_vk_sync_buffers(ctx, subctx);
+        }
     }
     ctx->prealloc_x_need_sync = true;
 }

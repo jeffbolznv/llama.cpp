@@ -14029,7 +14029,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 if (K > 128) {
                     return false;
                 }
-                if (N * N * sizeof(float) > device->properties.limits.maxComputeSharedMemorySize) {
+                if (N * N * sizeof(float) + N * K * sizeof(float) > device->properties.limits.maxComputeSharedMemorySize) {
                     return false;
                 }
                 return true;

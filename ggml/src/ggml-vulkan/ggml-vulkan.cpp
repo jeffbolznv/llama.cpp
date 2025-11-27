@@ -13870,7 +13870,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_LOG:
         case GGML_OP_TRI:
-            return op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16;
+            return (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16) &&
+                   op->type == op->src[0]->type;
         case GGML_OP_ARGSORT:
             {
                 if (!ggml_is_contiguous(op) || !ggml_is_contiguous(op->src[0])) {

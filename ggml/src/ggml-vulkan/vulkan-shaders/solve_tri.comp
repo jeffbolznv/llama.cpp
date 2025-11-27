@@ -64,7 +64,7 @@ void main() {
             [[unroll]] for (int c = 0; c < r; ++c) {
                 b -= shA[r * N + c] * X[c];
             }
-            float x = b / shA[r * N + r];
+            FLOAT_TYPE x = b / shA[r * N + r];
             X[r] = x;
             store_x(r, tid, x);
         }

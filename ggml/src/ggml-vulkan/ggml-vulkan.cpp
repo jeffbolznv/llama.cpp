@@ -4338,7 +4338,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
             } else if (strcmp("VK_KHR_pipeline_executable_properties", properties.extensionName) == 0) {
                 pipeline_executable_properties_support = true;
-            } else if (strcmp("VK_EXT_memory_priority", properties.extensionName) == 0) {
+            } else if (strcmp("VK_EXT_memory_priority", properties.extensionName) == 0 &&
+                       getenv("GGML_VK_ENABLE_MEMORY_PRIORITY")) {
                 device->memory_priority = true;
             }
         }

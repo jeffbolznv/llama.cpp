@@ -4987,7 +4987,7 @@ struct test_top_k : public test_case {
     const std::array<int64_t, 4> ne;
     const int k;
     const bool ties;
-    ggml_tensor *input {};
+    ggml_tensor * input {};
 
     std::string vars() override {
         return VARS_TO_STR4(type, ne, k, ties);

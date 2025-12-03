@@ -58,9 +58,11 @@ if (MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/bigobj>")
 endif()
 
-# enable parallel builds for msbuild
-list(APPEND CMAKE_VS_GLOBALS UseMultiToolTask=true)
-list(APPEND CMAKE_VS_GLOBALS EnforceProcessCountAcrossBuilds=true)
+if (LLAMA_STANDALONE)
+    # enable parallel builds for msbuild
+    list(APPEND CMAKE_VS_GLOBALS UseMultiToolTask=true)
+    list(APPEND CMAKE_VS_GLOBALS EnforceProcessCountAcrossBuilds=true)
+endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(LLAMA_TOOLS_INSTALL_DEFAULT OFF)

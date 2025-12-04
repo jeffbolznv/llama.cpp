@@ -13190,8 +13190,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             query_create_info.queryCount = cgraph->n_nodes + 100;
             ctx->query_pool = ctx->device->device.createQueryPool(query_create_info);
             ctx->num_queries = query_create_info.queryCount;
-            ctx->query_fusion_names.resize(cgraph->n_nodes);
-            ctx->query_nodes.resize(cgraph->n_nodes);
+            ctx->query_fusion_names.resize(ctx->num_queries);
+            ctx->query_nodes.resize(ctx->num_queries);
         }
 
         ctx->device->device.resetQueryPool(ctx->query_pool, 0, cgraph->n_nodes+1);

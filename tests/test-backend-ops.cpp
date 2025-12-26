@@ -5263,6 +5263,19 @@ struct test_topk_moe : public test_case {
     }
     // Verify two outputs
     std::vector<ggml_tensor *> fusion_test_nodes() override { return { selected_experts, weights }; }
+
+    // allow output in arbitrary order
+    double err(const float * a, const float * b, size_t n) override {
+        std::vector<float> a2(n);
+        std::vector<float> b2(n);
+        for (size_t i = 0; i < n; ++i) {
+            a2[i] = a[i];
+            b2[i] = b[i];
+        }
+        std::sort(a2.begin(), a2.end());
+        std::sort(b2.begin(), b2.end());
+        return nmse(a2.data(), b2.data(), n);
+    }
 };
 
 struct test_mul_mat_vec_fusion : public test_case {

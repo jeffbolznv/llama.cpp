@@ -13090,6 +13090,10 @@ static bool ggml_vk_can_fuse_topk_moe(ggml_backend_vk_context * ctx, const struc
             !ggml_is_contiguous(cgraph->nodes[node_idx + 2]->src[1])) {
             return false;
         }
+        // sigmoid fusion seems to generate infinities on moltenvk
+        if (ctx->device->driver_id == vk::DriverId::eMoltenvk) {
+            return false;
+        }
         break;
     case TOPK_MOE_EARLY_SOFTMAX:
         softmax = cgraph->nodes[node_idx + 0];

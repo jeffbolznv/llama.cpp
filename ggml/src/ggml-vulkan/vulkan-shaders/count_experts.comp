@@ -4,6 +4,14 @@
 
 #include "types.glsl"
 
+// see init_fastdiv_values in ggml-vulkan.cpp
+uint fastdiv(uint n, uint mp, uint L) {
+    uint msbs, lsbs;
+    // msbs = mulhi(n, mp)
+    umulExtended(n, mp, msbs, lsbs);
+    return (msbs + n) >> L;
+}
+
 layout (push_constant) uniform parameter
 {
     uint32_t ne00;
@@ -11,6 +19,8 @@ layout (push_constant) uniform parameter
     uint32_t nb00;
     uint32_t nb01;
     uint32_t a_offset;
+    uint32_t ne00mp;
+    uint32_t ne00L;
 } p;
 
 #define BLOCK_SIZE 256
@@ -29,8 +39,8 @@ void main() {
 
     uint count = 0;
     for (uint idx = tid; idx < num_elements; idx += BLOCK_SIZE) {
-        const uint i01 = idx / p.ne00;
-        const uint i00 = idx % p.ne00;
+        const uint i01 = fastdiv(idx, p.ne00mp, p.ne00L);
+        const uint i00 = idx - i01 * p.ne00;
         const uint a = data_a[p.a_offset + i01 * p.nb01 + i00 * p.nb00];
 
         count += uint(a == expert_id);

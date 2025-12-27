@@ -1011,6 +1011,8 @@ struct vk_op_count_experts_push_constants {
     uint32_t nb00;
     uint32_t nb01;
     uint32_t a_offset;
+    uint32_t ne00mp;
+    uint32_t ne00L;
 };
 
 struct vk_op_glu_push_constants {
@@ -1151,6 +1153,10 @@ template <> void init_pushconst_fastdiv(vk_op_unary_push_constants &p) {
     init_fastdiv_values(p.ne12*p.ne11*p.ne10,  p.ne1_012mp,    p.ne1_012L);
     init_fastdiv_values(p.ne11*p.ne10,         p.ne1_01mp,     p.ne1_01L);
     init_fastdiv_values(p.ne10,                p.ne1_0mp,      p.ne1_0L);
+}
+
+template <> void init_pushconst_fastdiv(vk_op_count_experts_push_constants &p) {
+    init_fastdiv_values(p.ne00,  p.ne00mp,    p.ne00L);
 }
 
 struct vk_op_binary_push_constants {
@@ -7730,11 +7736,16 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
         ggml_vk_sync_buffers(ctx, subctx);
     }
     {
-        const std::vector<uint32_t> pc = { (uint32_t)nei0,
-                                           (uint32_t)nei1,
-                                           (uint32_t)(nbi0 / ggml_type_size(ids->type)),
-                                           (uint32_t)(nbi1 / ggml_type_size(ids->type)),
-                                           (uint32_t)(get_misalign_bytes(ctx, ids) / ggml_type_size(ids->type)) };
+        vk_op_count_experts_push_constants pc = {
+            (uint32_t)nei0,
+            (uint32_t)nei1,
+            (uint32_t)(nbi0 / ggml_type_size(ids->type)),
+            (uint32_t)(nbi1 / ggml_type_size(ids->type)),
+            (uint32_t)(get_misalign_bytes(ctx, ids) / ggml_type_size(ids->type)),
+            0,
+            0,
+        };
+        init_pushconst_fastdiv(pc);
         ggml_vk_dispatch_pipeline(ctx, subctx, count_experts,
             { vk_subbuffer{ d_ids, ids_buf_offset, ids_sz }, expert_count_buf }, pc, { (uint32_t)n_as, 1, 1});
     }

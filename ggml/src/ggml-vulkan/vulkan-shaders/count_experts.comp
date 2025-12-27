@@ -21,29 +21,33 @@ layout (push_constant) uniform parameter
     uint32_t a_offset;
     uint32_t ne00mp;
     uint32_t ne00L;
+    uint32_t num_experts;
 } p;
 
 #define BLOCK_SIZE 256
+#define EXPERTS_PER_WORKGROUP 4
 
 layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) readonly buffer A {uint data_a[];};
 layout (binding = 1) writeonly buffer D {uint data_d[];};
 
-shared uint vals[BLOCK_SIZE];
+shared uvec4 vals[BLOCK_SIZE];
 
 void main() {
-    const uint expert_id = gl_WorkGroupID.x;
+    const uint expert_id = gl_WorkGroupID.x * EXPERTS_PER_WORKGROUP;
     const uint num_elements = p.ne00 * p.ne01;
     const uint tid = gl_LocalInvocationID.x;
 
-    uint count = 0;
+    uvec4 count = uvec4(0);
     for (uint idx = tid; idx < num_elements; idx += BLOCK_SIZE) {
         const uint i01 = fastdiv(idx, p.ne00mp, p.ne00L);
         const uint i00 = idx - i01 * p.ne00;
         const uint a = data_a[p.a_offset + i01 * p.nb01 + i00 * p.nb00];
 
-        count += uint(a == expert_id);
+        [[unroll]] for (int i = 0; i < EXPERTS_PER_WORKGROUP; ++i) {
+            count[i] += uint(a == expert_id + i);
+        }
     }
 
     vals[tid] = count;
@@ -56,6 +60,10 @@ void main() {
     }
 
     if (tid == 0) {
-        data_d[expert_id] = vals[0];
+        [[unroll]] for (int i = 0; i < EXPERTS_PER_WORKGROUP; ++i) {
+            if (expert_id + i < p.num_experts) {
+                data_d[expert_id + i] = vals[0][i];
+            }
+        }
     }
 }

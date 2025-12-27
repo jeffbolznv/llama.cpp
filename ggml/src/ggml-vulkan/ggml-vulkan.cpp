@@ -1013,6 +1013,7 @@ struct vk_op_count_experts_push_constants {
     uint32_t a_offset;
     uint32_t ne00mp;
     uint32_t ne00L;
+    uint32_t num_experts;
 };
 
 struct vk_op_glu_push_constants {
@@ -7744,10 +7745,11 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
             (uint32_t)(get_misalign_bytes(ctx, ids) / ggml_type_size(ids->type)),
             0,
             0,
+            (uint32_t)n_as,
         };
         init_pushconst_fastdiv(pc);
         ggml_vk_dispatch_pipeline(ctx, subctx, count_experts,
-            { vk_subbuffer{ d_ids, ids_buf_offset, ids_sz }, expert_count_buf }, pc, { (uint32_t)n_as, 1, 1});
+            { vk_subbuffer{ d_ids, ids_buf_offset, ids_sz }, expert_count_buf }, pc, { CEIL_DIV((uint32_t)n_as, 4), 1, 1});
     }
 
     if (x_non_contig) {

@@ -971,6 +971,7 @@ bool llama_model_loader::load_all_data(
     std::vector<ggml_backend_buffer_t> host_buffers;
     std::vector<ggml_backend_event_t> events;
     std::vector<void *> host_ptrs;
+    std::vector<void *> host_base_ptrs;
     size_t buffer_idx = 0; // buffer to use for async loads
     ggml_backend_t upload_backend = [&](const char * func) -> ggml_backend_t {
         if (use_mmap || check_tensors) {
@@ -1015,7 +1016,14 @@ bool llama_model_loader::load_all_data(
 
         // If the backend is supported, create pinned memory buffers and events for synchronisation.
         for (size_t idx = 0; idx < n_buffers; ++idx) {
-            auto * buf = ggml_backend_buft_alloc_buffer(host_buft, buffer_size);
+            void *base_ptr = malloc(buffer_size + 0x1000);
+            if (!base_ptr) {
+                return nullptr;
+            }
+            uintptr_t uptr = reinterpret_cast<uintptr_t>(base_ptr);
+            uptr = (uptr + 0x1000 - 1) & ~uintptr_t{0x1000 - 1};
+            void *p = reinterpret_cast<void *>(uptr);
+            auto *buf = ggml_backend_dev_buffer_from_host_ptr(dev, p, buffer_size, buffer_size);
 
             if (!buf) {
                 LLAMA_LOG_DEBUG("%s: failed to allocate host buffer for async uploads for device %s\n", func,
@@ -1024,7 +1032,8 @@ bool llama_model_loader::load_all_data(
             }
 
             host_buffers.emplace_back(buf);
-            host_ptrs.emplace_back(ggml_backend_buffer_get_base(buf));
+            host_ptrs.emplace_back(p);
+            host_base_ptrs.emplace_back(base_ptr);
 
             auto * event = ggml_backend_event_new(dev);
             if (!event) {
@@ -1181,6 +1190,9 @@ bool llama_model_loader::load_all_data(
     }
     for (auto * buf : host_buffers) {
         ggml_backend_buffer_free(buf);
+    }
+    for (auto * ptr : host_base_ptrs) {
+        free(ptr);
     }
     ggml_backend_free(upload_backend);
 

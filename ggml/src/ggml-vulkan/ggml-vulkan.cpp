@@ -229,6 +229,7 @@ static ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface = {
     /* .get_alloc_size   = */ ggml_backend_vk_buffer_type_get_alloc_size,
     /* .is_host          = */ NULL,
 };
+static vk_buffer ggml_vk_buffer_from_host_ptr(vk_device & device, void * ptr, size_t size);
 
 #ifdef GGML_VULKAN_MEMORY_DEBUG
 class vk_memory_logger;
@@ -802,7 +803,7 @@ struct vk_device_struct {
 
     std::vector<vk_pipeline_ref> all_pipelines;
 
-    std::vector<std::tuple<void*, size_t, vk_buffer>> pinned_memory;
+    std::vector<std::tuple<void*, size_t, vk_buffer, void*>> pinned_memory;
 
     vk::Fence fence;
     vk_buffer sync_staging;
@@ -2441,6 +2442,12 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
         0,
         nullptr,
     };
+
+    vk::ExternalMemoryBufferCreateInfo external_memory_bci;
+    if (import_ptr) {
+        external_memory_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+        buffer_create_info.setPNext(&external_memory_bci);
+    }
 
     buf->buffer = device->device.createBuffer(buffer_create_info);
 
@@ -5891,9 +5898,26 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
 
 static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
     VK_LOG_MEMORY("ggml_vk_host_malloc(" << size << ")");
-    vk_buffer buf = ggml_vk_create_buffer(device, size,
-        {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
-         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+
+    void *malloc_ptr {};
+    vk_buffer buf {};
+    if (device->external_memory_host) {
+        // overallocate to be able to align base and size
+        malloc_ptr = malloc(size + 2 * device->min_imported_host_pointer_alignment);
+        if (!malloc_ptr) {
+            return nullptr;
+        }
+
+        uintptr_t uptr = reinterpret_cast<uintptr_t>(malloc_ptr);
+        uptr = ROUNDUP_POW2(uptr, device->min_imported_host_pointer_alignment);
+        void *ptr = reinterpret_cast<void *>(uptr);
+
+        buf = ggml_vk_buffer_from_host_ptr(device, ptr, ROUNDUP_POW2(size, device->min_imported_host_pointer_alignment));
+    } else {
+        buf = ggml_vk_create_buffer(device, size,
+            {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
+             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+    }
 
     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
         fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
@@ -5904,7 +5928,7 @@ static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
     }
 
     std::lock_guard<std::recursive_mutex> guard(device->mutex);
-    device->pinned_memory.push_back(std::make_tuple(buf->ptr, size, buf));
+    device->pinned_memory.push_back(std::make_tuple(buf->ptr, size, buf, malloc_ptr));
 
     return buf->ptr;
 }
@@ -5933,6 +5957,7 @@ static void ggml_vk_host_free(vk_device& device, void* ptr) {
     }
 
     ggml_vk_destroy_buffer(buf);
+    free(std::get<3>(device->pinned_memory[index]));
 
     device->pinned_memory.erase(device->pinned_memory.begin() + index);
 }
@@ -14806,22 +14831,17 @@ static void ggml_backend_vk_device_event_synchronize(ggml_backend_dev_t dev, ggm
     VK_CHECK(device->device.waitForFences({ vkev->fence }, true, UINT64_MAX), "event_synchronize");
 }
 
-static ggml_backend_buffer_t ggml_backend_vk_device_buffer_from_host_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
-    VK_LOG_DEBUG("ggml_backend_vk_device_buffer_from_host_ptr(backend=" << dev << ", ptr=" << ptr << ", size=" << size << ")");
-    GGML_UNUSED(max_tensor_size);
-
-    ggml_backend_buffer_t ret {};
-
-    ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
-    auto device = ggml_vk_get_device(ctx->device);
-
+static vk_buffer ggml_vk_buffer_from_host_ptr(vk_device & device, void * ptr, size_t size) {
     if (!device->external_memory_host) {
-        return ret;
+        return {};
     }
 
     uintptr_t uptr = reinterpret_cast<uintptr_t>(ptr);
     if (uptr & (device->min_imported_host_pointer_alignment - 1)) {
-        return ret;
+        return {};
+    }
+    if (size & (device->min_imported_host_pointer_alignment - 1)) {
+        return {};
     }
 
     vk::MemoryHostPointerPropertiesEXT host_pointer_props;
@@ -14829,7 +14849,7 @@ static ggml_backend_buffer_t ggml_backend_vk_device_buffer_from_host_ptr(ggml_ba
         host_pointer_props = device->device.getMemoryHostPointerPropertiesEXT(vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT, ptr);
     } catch (vk::SystemError& e) {
         GGML_LOG_WARN("ggml_vulkan: Failed getMemoryHostPointerPropertiesEXT (%s)\n", e.what());
-        return ret;
+        return {};
     }
     vk::PhysicalDeviceMemoryProperties mem_props = device->physical_device.getMemoryProperties();
 
@@ -14841,14 +14861,14 @@ static ggml_backend_buffer_t ggml_backend_vk_device_buffer_from_host_ptr(ggml_ba
         }
 
         vk::MemoryType memory_type = mem_props.memoryTypes[memory_type_idx];
-        // check for visible+coherent+cache. Other flags (e.g. devicelocal) are allowed
+        // check for visible+coherent+cached. Other flags (e.g. devicelocal) are allowed
         if ((memory_type.propertyFlags & property_flags) == property_flags) {
             property_flags = memory_type.propertyFlags;
             break;
         }
     }
     if (memory_type_idx == 32) {
-        return ret;
+        return {};
     }
 
     vk_buffer buf {};
@@ -14856,16 +14876,27 @@ static ggml_backend_buffer_t ggml_backend_vk_device_buffer_from_host_ptr(ggml_ba
         buf = ggml_vk_create_buffer(device, size, { property_flags }, ptr, memory_type_idx);
     } catch (vk::SystemError& e) {
         GGML_LOG_WARN("ggml_vulkan: Failed ggml_vk_create_buffer (%s)\n", e.what());
-        return ret;
     }
 
+    return buf;
+}
+
+static ggml_backend_buffer_t ggml_backend_vk_device_buffer_from_host_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
+    VK_LOG_DEBUG("ggml_backend_vk_device_buffer_from_host_ptr(backend=" << dev << ", ptr=" << ptr << ", size=" << size << ")");
+    GGML_UNUSED(max_tensor_size);
+
+    ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
+    auto device = ggml_vk_get_device(ctx->device);
+
+    vk_buffer buf = ggml_vk_buffer_from_host_ptr(device, ptr, size);
+
     if (!buf) {
-        return ret;
+        return {};
     }
 
     ggml_backend_vk_buffer_context * bufctx = new ggml_backend_vk_buffer_context(device, std::move(buf), device->name);
 
-    ret = ggml_backend_buffer_init(ggml_backend_vk_device_get_buffer_type(dev), ggml_backend_vk_buffer_interface, bufctx, size);
+    ggml_backend_buffer_t ret = ggml_backend_buffer_init(ggml_backend_vk_device_get_buffer_type(dev), ggml_backend_vk_buffer_interface, bufctx, size);
 
     return ret;
 }

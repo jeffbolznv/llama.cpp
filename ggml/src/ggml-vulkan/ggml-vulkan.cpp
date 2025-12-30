@@ -4539,6 +4539,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->vendor_id = device->properties.vendorID;
         device->driver_id = driver_props.driverID;
 
+        if (device->driver_id == vk::DriverId::eMoltenvk) {
+            // Disable external_memory_host until https://github.com/KhronosGroup/MoltenVK/pull/2622
+            // is available in the Vulkan SDK.
+            device->external_memory_host = false;
+        }
+
         // Implementing the async backend interfaces seems broken on older Intel HW,
         // see https://github.com/ggml-org/llama.cpp/issues/17302.
         device->support_async = (device->vendor_id != VK_VENDOR_ID_INTEL ||

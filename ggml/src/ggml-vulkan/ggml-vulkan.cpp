@@ -229,7 +229,6 @@ static ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface = {
     /* .get_alloc_size   = */ ggml_backend_vk_buffer_type_get_alloc_size,
     /* .is_host          = */ NULL,
 };
-static vk_buffer ggml_vk_buffer_from_host_ptr(vk_device & device, void * ptr, size_t size);
 
 #ifdef GGML_VULKAN_MEMORY_DEBUG
 class vk_memory_logger;
@@ -803,7 +802,7 @@ struct vk_device_struct {
 
     std::vector<vk_pipeline_ref> all_pipelines;
 
-    std::vector<std::tuple<void*, size_t, vk_buffer, void*>> pinned_memory;
+    std::vector<std::tuple<void*, size_t, vk_buffer>> pinned_memory;
 
     vk::Fence fence;
     vk_buffer sync_staging;
@@ -5937,26 +5936,9 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
 
 static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
     VK_LOG_MEMORY("ggml_vk_host_malloc(" << size << ")");
-
-    void *malloc_ptr {};
-    vk_buffer buf {};
-    if (device->external_memory_host) {
-        // overallocate to be able to align base and size
-        malloc_ptr = malloc(size + 2 * device->min_imported_host_pointer_alignment);
-        if (!malloc_ptr) {
-            return nullptr;
-        }
-
-        uintptr_t uptr = reinterpret_cast<uintptr_t>(malloc_ptr);
-        uptr = ROUNDUP_POW2(uptr, device->min_imported_host_pointer_alignment);
-        void *ptr = reinterpret_cast<void *>(uptr);
-
-        buf = ggml_vk_buffer_from_host_ptr(device, ptr, ROUNDUP_POW2(size, device->min_imported_host_pointer_alignment));
-    } else {
-        buf = ggml_vk_create_buffer(device, size,
-            {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
-             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
-    }
+    vk_buffer buf = ggml_vk_create_buffer(device, size,
+        {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
+         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
 
     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
         fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
@@ -5967,7 +5949,7 @@ static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
     }
 
     std::lock_guard<std::recursive_mutex> guard(device->mutex);
-    device->pinned_memory.push_back(std::make_tuple(buf->ptr, size, buf, malloc_ptr));
+    device->pinned_memory.push_back(std::make_tuple(buf->ptr, size, buf));
 
     return buf->ptr;
 }
@@ -5996,7 +5978,6 @@ static void ggml_vk_host_free(vk_device& device, void* ptr) {
     }
 
     ggml_vk_destroy_buffer(buf);
-    free(std::get<3>(device->pinned_memory[index]));
 
     device->pinned_memory.erase(device->pinned_memory.begin() + index);
 }

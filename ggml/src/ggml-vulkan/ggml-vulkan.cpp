@@ -14421,9 +14421,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             return false;
         }
         // For im2col shaders using BDA, maxStorageBufferRange limit doesn't apply.
-        // XXX TODO interaction with https://github.com/ggml-org/llama.cpp/pull/18678:
         // If shader64BitIndexing is enabled, maxStorageBufferRange limit doesn't apply.
-        if (!uses_bda) {
+        if (!uses_bda && !device->shader_64b_indexing) {
             if (tensor_size > device->properties.limits.maxStorageBufferRange) {
                 return false;
             }

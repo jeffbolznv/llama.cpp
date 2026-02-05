@@ -1047,7 +1047,7 @@ struct vk_flash_attn_push_constants {
     float max_bias;
     float logit_softcap;
 
-    uint32_t n_head_log2;
+    uint32_t mask_n_head_log2;
     float m0;
     float m1;
 
@@ -8612,8 +8612,7 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
 
     uint32_t flags = (use_mask_opt       ? 1 : 0) |
                      (mask != nullptr    ? 2 : 0) |
-                     (logit_softcap != 0 ? 4 : 0) |
-                     (sinks != nullptr   ? 8 : 0);
+                     (logit_softcap != 0 ? 4 : 0);
 
     vk_fa_pipeline_state fa_pipeline_state(HSK, HSV, small_rows, small_cache, path, aligned, f32acc, flags);
 
@@ -8708,6 +8707,8 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
     vk_subbuffer sinks_buf = sinks ? ggml_vk_tensor_subbuffer(ctx, sinks) : q_buf;
     vk_subbuffer mask_opt_buf = use_mask_opt ? ggml_vk_subbuffer(ctx, ctx->prealloc_y, 0) : q_buf;
 
+    uint32_t mask_n_head_log2 = ((sinks != nullptr) << 24) | n_head_log2;
+
     if (use_mask_opt)
     {
         const vk_op_flash_attn_mask_opt_push_constants opt_pc = {
@@ -8738,7 +8739,7 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
                                               k_stride, (uint32_t)nbk2, (uint32_t)nbk3,
                                               v_stride, (uint32_t)nbv2, (uint32_t)nbv3,
                                               scale, max_bias, logit_softcap,
-                                              n_head_log2, m0, m1,
+                                              mask_n_head_log2, m0, m1,
                                               gqa_ratio, split_kv, split_k };
 
     if (split_k > 1) {

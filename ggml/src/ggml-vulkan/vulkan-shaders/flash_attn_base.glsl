@@ -15,7 +15,6 @@ layout (constant_id = 9) const uint32_t Flags = 0;
 const bool USE_MASK_OPT  = (Flags & 1) != 0;
 const bool MASK_ENABLE   = (Flags & 2) != 0;
 const bool LOGIT_SOFTCAP = (Flags & 4) != 0;
-const bool SINK_ENABLE   = (Flags & 8) != 0;
 
 // Round up head sizes to a multiple of 16, for coopmat1/coopmat2 paths
 const uint32_t HSK_pad = (HSK + 15) & ~15;
@@ -55,7 +54,7 @@ layout (push_constant) uniform parameter {
     float max_bias;
     float logit_softcap;
 
-    uint32_t n_head_log2;
+    uint32_t mask_n_head_log2;
     float m0;
     float m1;
 
@@ -63,6 +62,9 @@ layout (push_constant) uniform parameter {
     uint32_t split_kv;
     uint32_t k_num;
 } p;
+
+#define SINK_ENABLE_BIT (1<<24)
+#define N_LOG2_MASK 0xFFFF
 
 layout (binding = 4) readonly buffer S {float data_s[];};
 
@@ -161,7 +163,7 @@ ACC_TYPE perElemOpComputeSlope(const in uint32_t r, const in uint32_t c, const i
 {
     const uint32_t h = iq2 + (r % p.gqa_ratio);
 
-    uint32_t n_head_log2 = p.n_head_log2;
+    uint32_t n_head_log2 = p.mask_n_head_log2 & N_LOG2_MASK;
 
     const ACC_TYPE base = ACC_TYPE(h < n_head_log2 ? p.m0 : p.m1);
     const int      exph = int(h < n_head_log2 ? h + 1 : 2*(h - n_head_log2) + 1);

@@ -377,6 +377,7 @@ void main() {
         [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
             coopMatStore(sums[cm_col * cms_per_row + cm_row], coopmat_stage, warp_i * TM * TN, TM, gl_CooperativeMatrixLayoutColumnMajor);
 
+            barrier();
             [[unroll]] for (uint col = 0; col < TN; col += storestride) {
                 const uint row_i = dc + cm_col * TN + col + store_c;
                 if (row_i >= _ne1) break;
@@ -387,6 +388,7 @@ void main() {
                     data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
                 }
             }
+            barrier();
         }
     }
 #else
@@ -403,20 +405,27 @@ void main() {
             } else if (is_in_bounds) {
                 // Full coopMat is within bounds, but stride_d is not aligned
                 coopMatStore(sums[cm_col * cms_per_row + cm_row], coopmat_stage, warp_i * TM * TN, TM, gl_CooperativeMatrixLayoutColumnMajor);
-
-                [[unroll]] for (uint col = 0; col < TN; col += storestride) {
-                    data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
-                }
             } else if (dr + cm_row * TM < p.M && dc + cm_col * TN < p.N) {
                 // Partial coopMat is within bounds
                 coopMatStore(sums[cm_col * cms_per_row + cm_row], coopmat_stage, warp_i * TM * TN, TM, gl_CooperativeMatrixLayoutColumnMajor);
+            }
 
-                [[unroll]] for (uint col = 0; col < TN; col += storestride) {
-                    if (dr + cm_row * TM + store_r < p.M && dc + cm_col * TN + col + store_c < p.N) {
+            barrier();
+
+            if (!(is_aligned && is_in_bounds)) {
+                if (is_in_bounds) {
+                    [[unroll]] for (uint col = 0; col < TN; col += storestride) {
                         data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
+                    }
+                } else if (dr + cm_row * TM < p.M && dc + cm_col * TN < p.N) {
+                    [[unroll]] for (uint col = 0; col < TN; col += storestride) {
+                        if (dr + cm_row * TM + store_r < p.M && dc + cm_col * TN + col + store_c < p.N) {
+                            data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
+                        }
                     }
                 }
             }
+            barrier();
         }
     }
 #endif // MUL_MAT_ID

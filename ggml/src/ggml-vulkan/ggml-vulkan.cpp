@@ -20,20 +20,7 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher();
 #define VULKAN_HPP_DEFAULT_DISPATCHER ggml_vk_default_dispatcher()
 
 #include <vulkan/vulkan.hpp>
-// SPIR-V constants used for patching shaders at load time.
-// Defined inline to avoid a build dependency on spirv-headers.
-// Uses a separate namespace to avoid conflicts if spirv.hpp is included.
-namespace spv_const {
-    constexpr uint32_t OpCodeMask       = 0xFFFF;
-    constexpr uint32_t WordCountShift   = 16;
-    constexpr uint32_t OpExtension      = 10;
-    constexpr uint32_t OpEntryPoint     = 15;
-    constexpr uint32_t OpExecutionMode   = 16;
-    constexpr uint32_t OpCapability      = 17;
-    constexpr uint32_t OpExecutionModeId = 331;
-    constexpr uint32_t ExecutionModeRoundingModeRTE = 4462;
-    constexpr uint32_t CapabilityRoundingModeRTE    = 4467;
-} // namespace spv_const
+#include <spirv/unified1/spirv.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -2163,19 +2150,19 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
         uint32_t entry_point_id = 0;
 
         while (pos < spv.size()) {
-            uint32_t opcode = spv[pos] & spv_const::OpCodeMask;
-            uint32_t len    = spv[pos] >> spv_const::WordCountShift;
+            uint32_t opcode = spv[pos] & spv::OpCodeMask;
+            uint32_t len    = spv[pos] >> spv::WordCountShift;
             if (len == 0) break;
 
-            if (opcode == spv_const::OpCapability) {
+            if (opcode == spv::OpCapability) {
                 cap_insert_pos = pos + len;
                 ext_insert_pos = pos + len;
-            } else if (opcode == spv_const::OpExtension) {
+            } else if (opcode == spv::OpExtension) {
                 ext_insert_pos = pos + len;
-            } else if (opcode == spv_const::OpEntryPoint) {
+            } else if (opcode == spv::OpEntryPoint) {
                 entry_point_id = spv[pos + 2];
                 exec_insert_pos = pos + len;
-            } else if (opcode == spv_const::OpExecutionMode || opcode == spv_const::OpExecutionModeId) {
+            } else if (opcode == spv::OpExecutionMode || opcode == spv::OpExecutionModeId) {
                 exec_insert_pos = pos + len;
             } else if (entry_point_id != 0) {
                 break;
@@ -2187,19 +2174,19 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
         // Insert from latest position first so earlier indices stay valid.
 
         // OpExecutionMode %entrypoint RoundingModeRTE 16
-        uint32_t exec_mode[] = { (4u << spv_const::WordCountShift) | spv_const::OpExecutionMode, entry_point_id, spv_const::ExecutionModeRoundingModeRTE, 16 };
+        uint32_t exec_mode[] = { (4u << spv::WordCountShift) | spv::OpExecutionMode, entry_point_id, spv::ExecutionModeRoundingModeRTE, 16 };
         spv.insert(spv.begin() + exec_insert_pos, std::begin(exec_mode), std::end(exec_mode));
 
         // OpExtension "SPV_KHR_float_controls"
         const char ext_str[] = "SPV_KHR_float_controls";
         size_t ext_str_words = CEIL_DIV(sizeof(ext_str), sizeof(uint32_t));
         std::vector<uint32_t> extension(1 + ext_str_words, 0);
-        extension[0] = (uint32_t)((1 + ext_str_words) << spv_const::WordCountShift) | spv_const::OpExtension;
+        extension[0] = (uint32_t)((1 + ext_str_words) << spv::WordCountShift) | spv::OpExtension;
         memcpy(&extension[1], ext_str, sizeof(ext_str));
         spv.insert(spv.begin() + ext_insert_pos, extension.begin(), extension.end());
 
         // OpCapability RoundingModeRTE
-        uint32_t capability[] = { (2u << spv_const::WordCountShift) | spv_const::OpCapability, spv_const::CapabilityRoundingModeRTE };
+        uint32_t capability[] = { (2u << spv::WordCountShift) | spv::OpCapability, spv::CapabilityRoundingModeRTE };
         spv.insert(spv.begin() + cap_insert_pos, std::begin(capability), std::end(capability));
 
         shader_module_create_info = vk::ShaderModuleCreateInfo({}, spv.size() * sizeof(uint32_t), spv.data());

@@ -9,19 +9,15 @@ endif()
 find_package(Vulkan COMPONENTS glslc REQUIRED)
 
 include(FetchContent)
-find_package(SPIRV-Headers QUIET)
-if (NOT SPIRV-Headers_FOUND)
-    message(STATUS "SPIRV-Headers not found, fetching from GitHub")
-    FetchContent_Declare(
-        SPIRV-Headers
-        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
-        GIT_TAG        vulkan-sdk-1.4.304.0
-        GIT_SHALLOW    TRUE
-    )
-    set(SPIRV_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(SPIRV-Headers)
-endif()
+FetchContent_Declare(
+    SPIRV-Headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
+    GIT_TAG        vulkan-sdk-1.4.304.0
+    GIT_SHALLOW    TRUE
+)
+set(SPIRV_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(SPIRV-Headers)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # Parallel build object files

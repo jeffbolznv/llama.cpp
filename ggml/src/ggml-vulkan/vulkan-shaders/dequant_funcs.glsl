@@ -89,20 +89,18 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
 
 #if defined(DATA_A_Q1_0)
 vec2 dequantize(uint ib, uint iqs, uint a_offset) {
-    const float d = float(data_a[a_offset + ib].d);
     const uint bits = uint(data_a[a_offset + ib].qs[iqs / 8u]) >> (iqs % 8u);
     return vec2(
-        (bits & 1u) != 0u ? d : -d,
-        (bits & 2u) != 0u ? d : -d);
+        (bits & 1u) != 0u ? 1.0f : -1.0f,
+        (bits & 2u) != 0u ? 1.0f : -1.0f);
 }
 vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
-    const float d = float(data_a[a_offset + ib].d);
     const uint bits = uint(data_a[a_offset + ib].qs[iqs / 8u]) >> (iqs % 8u);
     return vec4(
-        (bits & 1u) != 0u ? d : -d,
-        (bits & 2u) != 0u ? d : -d,
-        (bits & 4u) != 0u ? d : -d,
-        (bits & 8u) != 0u ? d : -d);
+        (bits & 1u) != 0u ? 1.0f : -1.0f,
+        (bits & 2u) != 0u ? 1.0f : -1.0f,
+        (bits & 4u) != 0u ? 1.0f : -1.0f,
+        (bits & 8u) != 0u ? 1.0f : -1.0f);
 }
 #endif
 
@@ -475,7 +473,8 @@ vec2 get_dm(uint ib, uint a_offset) {
 
 #if defined(DATA_A_Q1_0)
 vec2 get_dm(uint ib, uint a_offset) {
-    return vec2(1, 0);
+    const float d = float(data_a[a_offset + ib].d);
+    return vec2(d, 0);
 }
 #endif
 

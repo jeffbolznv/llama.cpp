@@ -20,7 +20,13 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher();
 #define VULKAN_HPP_DEFAULT_DISPATCHER ggml_vk_default_dispatcher()
 
 #include <vulkan/vulkan.hpp>
+// SPIRV-Headers (Khronos spirv.hpp): LunarG Windows SDK uses Include/spirv-headers/ (no unified1/).
+// MinGW/MSYS2, Linux, etc. use the spirv-headers package layout spirv/unified1/.
+#if defined(_WIN32) && !defined(__MINGW32__)
+#include <spirv-headers/spirv.hpp>
+#else
 #include <spirv/unified1/spirv.hpp>
+#endif
 
 #include <algorithm>
 #include <cmath>

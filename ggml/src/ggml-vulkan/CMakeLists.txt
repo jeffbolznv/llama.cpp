@@ -8,17 +8,6 @@ endif()
 
 find_package(Vulkan COMPONENTS glslc REQUIRED)
 
-include(FetchContent)
-FetchContent_Declare(
-    SPIRV-Headers
-    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
-    GIT_TAG        vulkan-sdk-1.4.304.0
-    GIT_SHALLOW    TRUE
-)
-set(SPIRV_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(SPIRV-Headers)
-
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # Parallel build object files
     add_definitions(/MP)
@@ -97,7 +86,7 @@ if (Vulkan_FOUND)
         "GGML_VULKAN_BFLOAT16_GLSLC_SUPPORT"
     )
 
-    target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan SPIRV-Headers::SPIRV-Headers)
+    target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
     target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build

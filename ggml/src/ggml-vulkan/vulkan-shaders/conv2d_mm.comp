@@ -7,6 +7,13 @@
 #extension GL_KHR_memory_scope_semantics : enable
 #endif
 
+#ifdef COOPMAT
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : enable
+#endif
+
 #ifdef USE_COLLECTIVES
 #    extension GL_KHR_shader_subgroup_shuffle : enable
 #endif
@@ -83,8 +90,25 @@ layout(constant_id = 15) const uint aligned        = 0;
 // 1 to stage the cm2 accumulator through shmem (Csh) before global store; 0 to
 // use coopMatPerElementNV directly. Trades shmem footprint for more coalesced
 // global stores. Worth it for small tiles only -- on big tiles like 128x128 the
-// Csh cost hurts occupancy.
+// Csh cost hurts occupancy. (cm1 always uses Csh and ignores this.)
 layout(constant_id = 16) const uint csh_store      = 0;
+
+#ifdef COOPMAT
+// cm1 subgroup-tile sizes. Each subgroup owns a WM x WN region of the BS_K x
+// BS_NPQ workgroup tile and computes it as a (WM/TM) x (WN/TN) grid of TMxTNxTK
+// fragments. Constraints: WM % TM == 0, WN % TN == 0, BS_K % WM == 0,
+// BS_NPQ % WN == 0, BS_CRS % TK == 0, and the workgroup must be sized to
+// (BS_K/WM) * (BS_NPQ/WN) * subgroup_size threads.
+layout(constant_id = 17) const uint WM             = 32;
+layout(constant_id = 18) const uint WN             = 32;
+const uint TM = 16;
+const uint TN = 16;
+const uint TK = 16;
+const uint cms_per_row = WM / TM;
+const uint cms_per_col = WN / TN;
+const uint warps_M     = BS_K / WM;
+const uint warps_N     = BS_NPQ / WN;
+#endif
 
 // H/W bounds on matB are unnecessary in the non-TRANSPOSE case when there is no
 // padding: with p0 == p1 == 0, the standard OH/OW formulas guarantee
@@ -120,7 +144,7 @@ uint32_t n_elems_out = K * NPQ;
 // Number of blocktiles per input
 uint32_t NB_CRS = splitWork(CRS, BS_CRS);
 
-#ifdef COOPMAT2
+#if defined(COOPMAT2) || defined(COOPMAT)
 #define SHMEM_TYPE float16_t
 #else
 #define SHMEM_TYPE float
@@ -138,14 +162,18 @@ const uint32_t Bsh_len = BS_CRS * Bsh_stride;
 shared SHMEM_TYPE Ash[Ash_len];  // K x CRS
 shared SHMEM_TYPE Bsh[Bsh_len];  // CRS x NPQ
 
-#ifdef COOPMAT2
+#if defined(COOPMAT2) || defined(COOPMAT)
 // Stage matC through shmem so the global stores can be issued in row-major
 // (NPQ-contiguous) order rather than via coopMatPerElementNV's hardware-defined
 // fragment ordering. This trades extra shmem and a barrier for better store
 // coalescing, which matters for shapes whose OW < BS_NPQ (so each matrix row
 // fragments into multiple short OW runs in dst).
 const uint32_t Csh_stride = BS_NPQ;
+#ifdef COOPMAT
+const uint32_t Csh_len    = BS_K * Csh_stride;
+#else
 const uint32_t Csh_len    = csh_store != 0 ? BS_K * Csh_stride : 1;
+#endif
 shared SHMEM_TYPE Csh[Csh_len];  // K x NPQ
 #endif
 
@@ -213,6 +241,13 @@ void main() {
 #ifdef COOPMAT2
     coopmat<ACC_TYPE, gl_ScopeWorkgroup, BS_K, BS_NPQ, gl_MatrixUseAccumulator> matC;
     matC = coopmat<ACC_TYPE, gl_ScopeWorkgroup, BS_K, BS_NPQ, gl_MatrixUseAccumulator>(0.0);
+#elif defined(COOPMAT)
+    coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums[cms_per_row * cms_per_col];
+    [[unroll]] for (uint i = 0; i < cms_per_row * cms_per_col; i++) {
+        sums[i] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+    }
+    const uint warp_r = gl_SubgroupID / warps_N;
+    const uint warp_c = gl_SubgroupID % warps_N;
 #else
     float regC[TS_K][TS_NPQ];
     for (uint32_t T_ly = 0; T_ly < TS_K; T_ly++) {
@@ -358,6 +393,24 @@ void main() {
         coopMatLoad(matA, Ash, 0, Ash_stride, gl_CooperativeMatrixLayoutRowMajor);
         coopMatLoad(matB, Bsh, 0, Bsh_stride, gl_CooperativeMatrixLayoutRowMajor);
         matC = coopMatMulAdd(matA, matB, matC);
+#elif defined(COOPMAT)
+        // Walk the BS_CRS dim in TK-sized chunks; each subgroup multiplies its
+        // (cms_per_row x cms_per_col) grid of TMxTNxTK fragments per chunk.
+        [[unroll]] for (uint k_step = 0; k_step < BS_CRS / TK; k_step++) {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a[cms_per_row];
+            [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+                const uint a_off = (warp_r * WM + cm_row * TM) * Ash_stride + k_step * TK;
+                coopMatLoad(cache_a[cm_row], Ash, a_off, Ash_stride, gl_CooperativeMatrixLayoutRowMajor);
+            }
+            [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+                coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b;
+                const uint b_off = k_step * TK * Bsh_stride + warp_c * WN + cm_col * TN;
+                coopMatLoad(cache_b, Bsh, b_off, Bsh_stride, gl_CooperativeMatrixLayoutRowMajor);
+                [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a[cm_row], cache_b, sums[cm_col * cms_per_row + cm_row]);
+                }
+            }
+        }
 #else
         if (T_y * TS_K < K) {
             UNROLL for (uint32_t CRS_lidx = 0; CRS_lidx < BS_CRS; CRS_lidx++) {
@@ -380,11 +433,28 @@ void main() {
         barrier();
     }
     /* Save C* */
-#ifdef COOPMAT2
-    if (csh_store != 0) {
-        // Place the accumulator into Csh, then have the WG store it to dst with
-        // NPQ-contiguous coalesced stores.
+#if defined(COOPMAT2) || defined(COOPMAT)
+    // cm1 always uses the staged path; cm2 uses it iff csh_store==1. Both
+    // paths first place the accumulator into Csh, then have the WG store it
+    // to dst with NPQ-contiguous coalesced stores.
+#ifdef COOPMAT
+    const bool use_staged_store = true;
+#else
+    const bool use_staged_store = (csh_store != 0);
+#endif
+    if (use_staged_store) {
+#ifdef COOPMAT
+        // cm1: each subgroup stores its (cms_per_row x cms_per_col) grid of
+        // fragments into the shared Csh slot for its (warp_r, warp_c) tile.
+        [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+            [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+                const uint csh_off = (warp_r * WM + cm_row * TM) * Csh_stride + warp_c * WN + cm_col * TN;
+                coopMatStore(sums[cm_col * cms_per_row + cm_row], Csh, csh_off, Csh_stride, gl_CooperativeMatrixLayoutRowMajor);
+            }
+        }
+#else
         coopMatStore(matC, Csh, 0, Csh_stride, gl_CooperativeMatrixLayoutRowMajor);
+#endif
         barrier();
 
         // Cooperative shmem -> global store. Each iteration covers
@@ -407,9 +477,12 @@ void main() {
                 dst_data[dst_idx] = D_TYPE(Csh[k_local * Csh_stride + npq_thread]);
             }
         }
-    } else {
+    }
+#ifdef COOPMAT2
+    else {
         coopMatPerElementNV(matC, matC, perElemOpStore);
     }
+#endif
 #else
     if (T_y * TS_K < K) {
         for (uint32_t T_ly = 0; T_ly < TS_K; T_ly++) {

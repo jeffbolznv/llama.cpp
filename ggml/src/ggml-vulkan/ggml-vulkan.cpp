@@ -4872,18 +4872,53 @@ static void ggml_vk_load_shaders(vk_device& device) {
                 conv2d_BS.CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
         }
 
+        // Determine whether we'll use cm1 for this shape. cm1 is only used
+        // when cm2 is unavailable (cm2 is always preferred when present), and
+        // we cap cm1 at the 64x128 tile because the 128x128 register pressure
+        // is brutal for the subgroup-tile coopmat layout.
+        bool conv2d_use_cm1 = false;
+#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+        conv2d_use_cm1 = !device->coopmat2 &&
+                         device->coopmat_support && device->coopmat_acc_f16_support &&
+                         s != CONV_SHAPE_128x128;
+#endif
+
+        // cm1 needs fp16 shmem padding like cm2, plus its own WG sizing so
+        // that warps_M * warps_N * subgroup_size == WG_SIZE.
+        uint32_t conv2d_WM = 16, conv2d_WN = 16;  // ignored unless cm1
+        if (conv2d_use_cm1) {
+            conv2d_SHMEM_PAD = 8;
+            // 16x16x16 fragments. Pick subgroup-tile sizes so we end up with 8
+            // subgroups per WG (i.e. WG = 8 * subgroup_size, typically 256 on
+            // NV/RDNA-32 or 512 on AMD-CDNA-64).
+            switch (s) {
+                case CONV_SHAPE_64x32:   conv2d_WM = 16; conv2d_WN = 16; break;  // warps 4x2, cms 1x1
+                case CONV_SHAPE_64x128:  conv2d_WM = 32; conv2d_WN = 32; break;  // warps 2x4, cms 2x2
+                case CONV_SHAPE_32x256:  conv2d_WM = 32; conv2d_WN = 32; break;  // warps 1x8, cms 2x2
+                default: break;
+            }
+            const uint32_t warps_M = conv2d_BS.K / conv2d_WM;
+            const uint32_t warps_N = conv2d_BS.NPQ / conv2d_WN;
+            conv2d_WG_SIZE         = warps_M * warps_N * device->subgroup_size;
+        }
+
         // Stage the cm2 accumulator through shmem before the global store.
         // Wins consistently on smaller tile shapes (replaces the per-elem
         // callback in coopMatPerElementNV with a coalesced cooperative
         // shmem->global pass). On the 128x128 shape the Csh footprint
         // (32 KB fp16) halves occupancy, which loses more than the better
-        // stores save on workloads big enough to use that occupancy.
-        const uint32_t conv2d_csh_store = (device->coopmat2 && s != CONV_SHAPE_128x128) ? 1u : 0u;
+        // stores save on workloads big enough to use that occupancy. cm1
+        // always uses the staged path (no per-elem callback equivalent).
+        uint32_t conv2d_csh_store = (device->coopmat2 && s != CONV_SHAPE_128x128) ? 1u : 0u;
+        if (conv2d_use_cm1) {
+            conv2d_csh_store = 1;
+        }
 
-        // SHMEM_TYPE in the shader is fp16 on the cm2 path (where the Csh
-        // staging buffer also lives, when csh_store==1) and fp32 on the
+        // SHMEM_TYPE in the shader is fp16 on the cm2/cm1 paths (where the
+        // Csh staging buffer also lives, when csh_store==1) and fp32 on the
         // scalar path (no Csh).
-        const uint32_t conv2d_shmem_elem_size = device->coopmat2 ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
+        const bool     conv2d_use_fp16_shmem = device->coopmat2 || conv2d_use_cm1;
+        const uint32_t conv2d_shmem_elem_size = conv2d_use_fp16_shmem ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
         const uint32_t conv2d_csh_elems       = conv2d_csh_store ? conv2d_BS.K * conv2d_BS.NPQ : 0u;
         uint32_t conv2d_shmem_req =
             (conv2d_BS.K * (conv2d_BS.CRS + conv2d_SHMEM_PAD) + conv2d_BS.CRS * (conv2d_BS.NPQ + conv2d_SHMEM_PAD) + conv2d_csh_elems) * conv2d_shmem_elem_size;
@@ -4911,6 +4946,8 @@ static void ggml_vk_load_shaders(vk_device& device) {
             spec_constants_cpy.push_back(state.KH); \
             spec_constants_cpy.push_back(state.aligned); \
             spec_constants_cpy.push_back(conv2d_csh_store); \
+            spec_constants_cpy.push_back(conv2d_WM); \
+            spec_constants_cpy.push_back(conv2d_WN); \
             ggml_vk_create_pipeline( \
                 device, c.second, #name #type_suffix, \
                 name##type_suffix##spv_suffix##_len, name##type_suffix##spv_suffix##_data, "main", 3, \
@@ -4924,6 +4961,11 @@ static void ggml_vk_load_shaders(vk_device& device) {
 #if defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
         if (device->coopmat2) {
             CREATE_CONVS(_cm2)
+        } else
+#endif
+#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+        if (conv2d_use_cm1) {
+            CREATE_CONVS(_cm1)
         } else
 #endif
         if (conv2d_UNROLL) {
@@ -9370,11 +9412,25 @@ static vk_conv_shapes ggml_vk_conv_select_shape(ggml_backend_vk_context * ctx, u
     // so small convolutions will still choose a smaller tile.
     const uint32_t shader_core_count = ctx->device->shader_core_count > 0 ? ctx->device->shader_core_count : 32;
 
-    if (K > 64 && n_tiles(CONV_SHAPE_128x128) >= shader_core_count * 2) {
+    // The 128x128 tile isn't built on cm1-only devices (register pressure with
+    // subgroup-tile coopmats is prohibitive); fall through to a smaller tile.
+    bool allow_128x128 = true;
+#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+    if (!ctx->device->coopmat2 && ctx->device->coopmat_support && ctx->device->coopmat_acc_f16_support) {
+        allow_128x128 = false;
+    }
+#endif
+
+    if (allow_128x128 && K > 64 && n_tiles(CONV_SHAPE_128x128) >= shader_core_count * 2) {
         return CONV_SHAPE_128x128;
     } else if (K <= 32 && n_tiles(CONV_SHAPE_32x256) >= shader_core_count * 2) {
         return CONV_SHAPE_32x256;
     } else if (K <= 64 && n_tiles(CONV_SHAPE_64x128) >= shader_core_count * 2) {
+        return CONV_SHAPE_64x128;
+    } else if (!allow_128x128 && K > 64 && n_tiles(CONV_SHAPE_64x128) >= shader_core_count * 2) {
+        // When 128x128 isn't built (cm1 path), large-K problems should still
+        // get the biggest available tile rather than dropping all the way to
+        // the small 64x32 fallback.
         return CONV_SHAPE_64x128;
     } else {
         return CONV_SHAPE_64x32;

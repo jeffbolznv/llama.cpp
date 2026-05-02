@@ -4829,7 +4829,11 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     // conv2d, conv_transpose_2d
     for (uint32_t s = 0; s < CONV_SHAPE_COUNT; ++s) {
-        uint32_t conv2d_WG_SIZE  = 256;
+        // The 64x32 fallback shape is used for small problems where each WG has
+        // very little compute and we're limited by warp-level latency hiding rather
+        // than total tile count. Halving WG_SIZE doubles per-thread work but lets
+        // more WGs run concurrently per SM, which improves latency hiding.
+        uint32_t conv2d_WG_SIZE  = (s == CONV_SHAPE_64x32) ? 128 : 256;
         uint32_t use_collectives = 0;  // Enables subgroup ops for preventing the re-calculation of indices.
         uint32_t conv2d_TS_K     = (s == CONV_SHAPE_64x32) ? 4 : 8;
         uint32_t conv2d_SHMEM_PAD = 4;

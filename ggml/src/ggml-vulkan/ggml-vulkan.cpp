@@ -4868,22 +4868,29 @@ static void ggml_vk_load_shaders(vk_device& device) {
                 conv2d_BS.CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
         }
 
-        // cm1 is used only when cm2 is unavailable; capped at 64x128 (due to shared memory size)
+        // cm1 is used only when cm2 is unavailable; capped at 64x128 (due to shared memory size).
+        // Requires 16x16x16 f16-acc since that's the fragment shape hard-coded in the shader.
+        // Subgroup size must be 32 or 64 (to keep WG_SIZE sane) and we need
+        // subgroup_size_control to force the driver to actually use it.
         bool conv2d_use_cm1 = false;
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
         conv2d_use_cm1 = !device->coopmat2 &&
-                         device->coopmat_support && device->coopmat_acc_f16_support &&
+                         device->coopmat_support && device->coopmat_support_16x16x16_f16acc &&
+                         device->subgroup_size_control &&
+                         (device->subgroup_size == 32 || device->subgroup_size == 64) &&
                          s != CONV_SHAPE_128x128;
 #endif
 
         uint32_t conv2d_WM = 16, conv2d_WN = 16;  // cm1 subgroup tile, ignored otherwise
         if (conv2d_use_cm1) {
             conv2d_SHMEM_PAD = 8;
-            // 16x16x16 fragments; pick WM/WN to give 8 subgroups per WG
+            // 16x16x16 fragments; pick WM/WN to keep WG_SIZE at 256
+            // (i.e. 8 subgroups for sg=32, 4 subgroups for sg=64).
+            const bool sg64 = (device->subgroup_size == 64);
             switch (s) {
-                case CONV_SHAPE_64x32:   conv2d_WM = 16; conv2d_WN = 16; break;
-                case CONV_SHAPE_64x128:  conv2d_WM = 32; conv2d_WN = 32; break;
-                case CONV_SHAPE_32x256:  conv2d_WM = 32; conv2d_WN = 32; break;
+                case CONV_SHAPE_64x32:   conv2d_WM = sg64 ? 32 : 16; conv2d_WN = 16; break;
+                case CONV_SHAPE_64x128:  conv2d_WM = 32; conv2d_WN = sg64 ? 64 : 32; break;
+                case CONV_SHAPE_32x256:  conv2d_WM = sg64 ? 16 : 32; conv2d_WN = sg64 ? 128 : 32; break;
                 default: break;
             }
             const uint32_t warps_M = conv2d_BS.K / conv2d_WM;
@@ -4920,6 +4927,9 @@ static void ggml_vk_load_shaders(vk_device& device) {
         std::array<uint32_t, 3> wg_denoms = { conv2d_BS.K, 1, 1 };
         std::vector<uint32_t> spec_constants = { conv2d_WG_SIZE, conv2d_BS.K, conv2d_BS.CRS, conv2d_BS.NPQ, conv2d_TS_K, use_collectives, conv2d_SHMEM_PAD };
 
+        // cm1 needs a fixed subgroup width to match the WG_SIZE we computed
+        const uint32_t conv2d_required_subgroup_size = conv2d_use_cm1 ? device->subgroup_size : 0;
+
 #define CREATE_CONV(name, type_suffix, spv_suffix) \
         for (auto &c : device->pipeline_##name##type_suffix[s]) { \
             const vk_conv2d_pipeline_state &state = c.first;  \
@@ -4939,7 +4949,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
             ggml_vk_create_pipeline( \
                 device, c.second, #name #type_suffix, \
                 name##type_suffix##spv_suffix##_len, name##type_suffix##spv_suffix##_data, "main", 3, \
-                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants_cpy, 1, true, use_collectives);    \
+                sizeof(vk_op_conv2d_push_constants), wg_denoms, spec_constants_cpy, 1, true, use_collectives || conv2d_required_subgroup_size, conv2d_required_subgroup_size);    \
         }
 #define CREATE_CONVS(spv_suffix) \
         CREATE_CONV(conv2d, _f32, spv_suffix) \

@@ -4872,8 +4872,21 @@ static void ggml_vk_load_shaders(vk_device& device) {
                 conv2d_BS.CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
         }
 
+        // Stage the cm2 accumulator through shmem before the global store.
+        // Wins consistently on smaller tile shapes (replaces the per-elem
+        // callback in coopMatPerElementNV with a coalesced cooperative
+        // shmem->global pass). On the 128x128 shape the Csh footprint
+        // (32 KB fp16) halves occupancy, which loses more than the better
+        // stores save on workloads big enough to use that occupancy.
+        const uint32_t conv2d_csh_store = (device->coopmat2 && s != CONV_SHAPE_128x128) ? 1u : 0u;
+
+        // SHMEM_TYPE in the shader is fp16 on the cm2 path (where the Csh
+        // staging buffer also lives, when csh_store==1) and fp32 on the
+        // scalar path (no Csh).
+        const uint32_t conv2d_shmem_elem_size = device->coopmat2 ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
+        const uint32_t conv2d_csh_elems       = conv2d_csh_store ? conv2d_BS.K * conv2d_BS.NPQ : 0u;
         uint32_t conv2d_shmem_req =
-            (conv2d_BS.K * (conv2d_BS.CRS + conv2d_SHMEM_PAD) + conv2d_BS.CRS * (conv2d_BS.NPQ + conv2d_SHMEM_PAD)) * sizeof(float);
+            (conv2d_BS.K * (conv2d_BS.CRS + conv2d_SHMEM_PAD) + conv2d_BS.CRS * (conv2d_BS.NPQ + conv2d_SHMEM_PAD) + conv2d_csh_elems) * conv2d_shmem_elem_size;
         if (device->properties.limits.maxComputeSharedMemorySize < conv2d_shmem_req) {
             conv2d_BS.CRS = 8;
             if (use_collectives) {
@@ -4897,6 +4910,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
             spec_constants_cpy.push_back(state.KW); \
             spec_constants_cpy.push_back(state.KH); \
             spec_constants_cpy.push_back(state.aligned); \
+            spec_constants_cpy.push_back(conv2d_csh_store); \
             ggml_vk_create_pipeline( \
                 device, c.second, #name #type_suffix, \
                 name##type_suffix##spv_suffix##_len, name##type_suffix##spv_suffix##_data, "main", 3, \

@@ -80,6 +80,11 @@ layout(constant_id = 14) const uint KH             = 1;
 // 1 if K/CRS/NPQ are exact multiples of BS_K/BS_CRS/BS_NPQ. When set, K/CRS/NPQ
 // bounds checks and the matA/matB address clamps and store guards are elided.
 layout(constant_id = 15) const uint aligned        = 0;
+// 1 to stage the cm2 accumulator through shmem (Csh) before global store; 0 to
+// use coopMatPerElementNV directly. Trades shmem footprint for more coalesced
+// global stores. Worth it for small tiles only -- on big tiles like 128x128 the
+// Csh cost hurts occupancy.
+layout(constant_id = 16) const uint csh_store      = 0;
 
 // H/W bounds on matB are unnecessary in the non-TRANSPOSE case when there is no
 // padding: with p0 == p1 == 0, the standard OH/OW formulas guarantee
@@ -132,6 +137,17 @@ const uint32_t Bsh_len = BS_CRS * Bsh_stride;
 
 shared SHMEM_TYPE Ash[Ash_len];  // K x CRS
 shared SHMEM_TYPE Bsh[Bsh_len];  // CRS x NPQ
+
+#ifdef COOPMAT2
+// Stage matC through shmem so the global stores can be issued in row-major
+// (NPQ-contiguous) order rather than via coopMatPerElementNV's hardware-defined
+// fragment ordering. This trades extra shmem and a barrier for better store
+// coalescing, which matters for shapes whose OW < BS_NPQ (so each matrix row
+// fragments into multiple short OW runs in dst).
+const uint32_t Csh_stride = BS_NPQ;
+const uint32_t Csh_len    = csh_store != 0 ? BS_K * Csh_stride : 1;
+shared SHMEM_TYPE Csh[Csh_len];  // K x NPQ
+#endif
 
 // Threadtile sizes
 const uint32_t TS_NPQ = BS_K * BS_NPQ / WG_SIZE / TS_K;
@@ -365,7 +381,35 @@ void main() {
     }
     /* Save C* */
 #ifdef COOPMAT2
-    coopMatPerElementNV(matC, matC, perElemOpStore);
+    if (csh_store != 0) {
+        // Place the accumulator into Csh, then have the WG store it to dst with
+        // NPQ-contiguous coalesced stores.
+        coopMatStore(matC, Csh, 0, Csh_stride, gl_CooperativeMatrixLayoutRowMajor);
+        barrier();
+
+        // Cooperative shmem -> global store. Each iteration covers
+        // store_rows_per_iter rows of the K dim with all WG threads spread
+        // across BS_NPQ. Adjacent threads write adjacent NPQ_idx (contiguous
+        // OW within an OH row), which is the contiguous direction of dst.
+        const uint32_t store_rows_per_iter = WG_SIZE / BS_NPQ;
+        const uint32_t store_iters         = BS_K / store_rows_per_iter;
+        const uint32_t k_thread_offset     = tid / BS_NPQ;
+        const uint32_t npq_thread          = tid % BS_NPQ;
+        [[unroll]] for (uint32_t i = 0; i < store_iters; i++) {
+            uint32_t k_local = i * store_rows_per_iter + k_thread_offset;
+            uint32_t K_idx   = B_idx_K * BS_K + k_local;
+            uint32_t NPQ_idx = B_idx_NPQ * BS_NPQ + npq_thread;
+            uint32_t N_idx   = fastdiv(NPQ_idx, p.OWOHmp, p.OWOHL);
+            uint32_t OH_idx  = fastdiv(NPQ_idx - N_idx * p.OH * p.OW, p.OWmp, p.OWL);
+            uint32_t OW_idx  = NPQ_idx - N_idx * p.OH * p.OW - OH_idx * p.OW;
+            uint32_t dst_idx = OW_idx + OH_idx * p.nb1 + K_idx * p.nb2 + N_idx * p.nb3;
+            if (aligned != 0 || (K_idx < K && NPQ_idx < NPQ)) {
+                dst_data[dst_idx] = D_TYPE(Csh[k_local * Csh_stride + npq_thread]);
+            }
+        }
+    } else {
+        coopMatPerElementNV(matC, matC, perElemOpStore);
+    }
 #else
     if (T_y * TS_K < K) {
         for (uint32_t T_ly = 0; T_ly < TS_K; T_ly++) {

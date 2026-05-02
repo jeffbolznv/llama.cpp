@@ -84,21 +84,15 @@ layout(constant_id = 12) const uint d1             = 1;
 // Kernel spatial sizes
 layout(constant_id = 13) const uint KW             = 1;
 layout(constant_id = 14) const uint KH             = 1;
-// 1 if K/CRS/NPQ are exact multiples of BS_K/BS_CRS/BS_NPQ. When set, K/CRS/NPQ
-// bounds checks and the matA/matB address clamps and store guards are elided.
+// when set, skip bounds checks and address clamps (K/CRS/NPQ are tile-aligned)
 layout(constant_id = 15) const uint aligned        = 0;
-// 1 to stage the cm2 accumulator through shmem (Csh) before global store; 0 to
-// use coopMatPerElementNV directly. Trades shmem footprint for more coalesced
-// global stores. Worth it for small tiles only -- on big tiles like 128x128 the
-// Csh cost hurts occupancy. (cm1 always uses Csh and ignores this.)
+// stage cm2 result through shmem (Csh) for coalesced stores. cm1 always does this.
 layout(constant_id = 16) const uint csh_store      = 0;
 
 #ifdef COOPMAT
-// cm1 subgroup-tile sizes. Each subgroup owns a WM x WN region of the BS_K x
-// BS_NPQ workgroup tile and computes it as a (WM/TM) x (WN/TN) grid of TMxTNxTK
-// fragments. Constraints: WM % TM == 0, WN % TN == 0, BS_K % WM == 0,
-// BS_NPQ % WN == 0, BS_CRS % TK == 0, and the workgroup must be sized to
-// (BS_K/WM) * (BS_NPQ/WN) * subgroup_size threads.
+// cm1 subgroup tile: each subgroup computes a WM x WN region as a grid of
+// TM x TN x TK fragments. Requires WM%TM == WN%TN == BS_K%WM == BS_NPQ%WN ==
+// BS_CRS%TK == 0, and WG_SIZE == (BS_K/WM) * (BS_NPQ/WN) * subgroup_size.
 layout(constant_id = 17) const uint WM             = 32;
 layout(constant_id = 18) const uint WN             = 32;
 const uint TM = 16;
@@ -110,18 +104,14 @@ const uint warps_M     = BS_K / WM;
 const uint warps_N     = BS_NPQ / WN;
 #endif
 
-// H/W bounds on matB are unnecessary in the non-TRANSPOSE case when there is no
-// padding: with p0 == p1 == 0, the standard OH/OW formulas guarantee
-// 0 <= H_idx < H and 0 <= W_idx < W. TRANSPOSE has different bounds reasoning
-// (H_idx_x_s1 can underflow), so we keep its checks unconditionally.
+// without padding, H_idx/W_idx are in bounds by construction (non-TRANSPOSE only)
 #ifdef TRANSPOSE
 const bool hw_in_bounds = false;
 #else
 const bool hw_in_bounds = (p0 == 0) && (p1 == 0);
 #endif
 
-// TRANSPOSE stride alignment checks reduce to (H_idx_x_s1 % s1 == 0). They're
-// trivially satisfied when s == 1.
+// TRANSPOSE stride alignment is trivially satisfied for stride 1
 #ifdef TRANSPOSE
 const bool stride_in_bounds = (s0 == 1) && (s1 == 1);
 #else
@@ -163,11 +153,7 @@ shared SHMEM_TYPE Ash[Ash_len];  // K x CRS
 shared SHMEM_TYPE Bsh[Bsh_len];  // CRS x NPQ
 
 #if defined(COOPMAT2) || defined(COOPMAT)
-// Stage matC through shmem so the global stores can be issued in row-major
-// (NPQ-contiguous) order rather than via coopMatPerElementNV's hardware-defined
-// fragment ordering. This trades extra shmem and a barrier for better store
-// coalescing, which matters for shapes whose OW < BS_NPQ (so each matrix row
-// fragments into multiple short OW runs in dst).
+// stage matC through shmem so global stores are row-major (NPQ-contiguous)
 const uint32_t Csh_stride = BS_NPQ;
 #ifdef COOPMAT
 const uint32_t Csh_len    = BS_K * Csh_stride;
@@ -358,10 +344,7 @@ void main() {
             uint32_t W_idx = OW_idx * s0 + KW_idx_b * d0 - p0;
 #endif
             uint32_t src_idx = W_idx + H_idx * p.nb11 + Cin_idx_b * p.nb12 + N_idx * p.nb13;
-            // Only clamp when an out-of-bounds address is actually possible. With
-            // aligned == 1 the CRS/NPQ checks below disappear, and with hw_in_bounds
-            // the H/W checks disappear -- so the address is guaranteed in range and
-            // no clamp is needed.
+            // skip clamp when address can't go OOB
             if (aligned == 0 || !hw_in_bounds || !stride_in_bounds) {
                 src_idx = min(max(src_idx, 0), p.Cin * p.N * p.W * p.H - 1);
             }
@@ -370,7 +353,7 @@ void main() {
             if (aligned == 0 && (CRS_idx_b >= CRS || NPQ_idx >= NPQ)) {
                 oob = true;
             }
-            // H/W bounds (also implicitly catches lower-bound underflow: idx >= 0x80000000).
+            // also catches lower-bound underflow (idx wraps to 0x80000000+)
             if (!hw_in_bounds && (H_idx >= p.H || W_idx >= p.W)) {
                 oob = true;
             }
@@ -394,8 +377,7 @@ void main() {
         coopMatLoad(matB, Bsh, 0, Bsh_stride, gl_CooperativeMatrixLayoutRowMajor);
         matC = coopMatMulAdd(matA, matB, matC);
 #elif defined(COOPMAT)
-        // Walk the BS_CRS dim in TK-sized chunks; each subgroup multiplies its
-        // (cms_per_row x cms_per_col) grid of TMxTNxTK fragments per chunk.
+        // each subgroup multiplies its grid of fragments per TK-sized CRS chunk
         [[unroll]] for (uint k_step = 0; k_step < BS_CRS / TK; k_step++) {
             coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a[cms_per_row];
             [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
@@ -434,9 +416,7 @@ void main() {
     }
     /* Save C* */
 #if defined(COOPMAT2) || defined(COOPMAT)
-    // cm1 always uses the staged path; cm2 uses it iff csh_store==1. Both
-    // paths first place the accumulator into Csh, then have the WG store it
-    // to dst with NPQ-contiguous coalesced stores.
+    // stage matC into Csh, then write to dst with coalesced NPQ-contiguous stores
 #ifdef COOPMAT
     const bool use_staged_store = true;
 #else
@@ -444,8 +424,7 @@ void main() {
 #endif
     if (use_staged_store) {
 #ifdef COOPMAT
-        // cm1: each subgroup stores its (cms_per_row x cms_per_col) grid of
-        // fragments into the shared Csh slot for its (warp_r, warp_c) tile.
+        // cm1: each subgroup stores its fragment grid into its Csh slot
         [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
             [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
                 const uint csh_off = (warp_r * WM + cm_row * TM) * Csh_stride + warp_c * WN + cm_col * TN;
@@ -457,10 +436,8 @@ void main() {
 #endif
         barrier();
 
-        // Cooperative shmem -> global store. Each iteration covers
-        // store_rows_per_iter rows of the K dim with all WG threads spread
-        // across BS_NPQ. Adjacent threads write adjacent NPQ_idx (contiguous
-        // OW within an OH row), which is the contiguous direction of dst.
+        // cooperative shmem->global: WG threads spread across BS_NPQ (the
+        // contiguous direction of dst), each iter covers store_rows_per_iter K-rows
         const uint32_t store_rows_per_iter = WG_SIZE / BS_NPQ;
         const uint32_t store_iters         = BS_K / store_rows_per_iter;
         const uint32_t k_thread_offset     = tid / BS_NPQ;

@@ -456,8 +456,7 @@ struct vk_conv2d_pipeline_state {
         : s0(s0), s1(s1), p0(p0), p1(p1), d0(d0), d1(d1), KW(KW), KH(KH), aligned(aligned) {}
 
     uint32_t s0, s1, p0, p1, d0, d1, KW, KH;
-    // 1 if K/CRS/NPQ are exact multiples of the corresponding tile sizes (BS_K/BS_CRS/BS_NPQ),
-    // allowing the shader to skip K/CRS/NPQ bounds checks and the load address clamps. 0 otherwise.
+    // when set, shader can skip K/CRS/NPQ bounds checks and address clamps
     uint32_t aligned;
 
     bool operator<(const vk_conv2d_pipeline_state &b) const {
@@ -4829,10 +4828,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     // conv2d, conv_transpose_2d
     for (uint32_t s = 0; s < CONV_SHAPE_COUNT; ++s) {
-        // The 64x32 fallback shape is used for small problems where each WG has
-        // very little compute and we're limited by warp-level latency hiding rather
-        // than total tile count. Halving WG_SIZE doubles per-thread work but lets
-        // more WGs run concurrently per SM, which improves latency hiding.
+        // smaller WG for the small-tile fallback gives more concurrent WGs per SM
         uint32_t conv2d_WG_SIZE  = (s == CONV_SHAPE_64x32) ? 128 : 256;
         uint32_t use_collectives = 0;  // Enables subgroup ops for preventing the re-calculation of indices.
         uint32_t conv2d_TS_K     = (s == CONV_SHAPE_64x32) ? 4 : 8;
@@ -4872,10 +4868,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
                 conv2d_BS.CRS);  // CRS block size should be capped at subgroup size for correctness when shuffle is used.
         }
 
-        // Determine whether we'll use cm1 for this shape. cm1 is only used
-        // when cm2 is unavailable (cm2 is always preferred when present), and
-        // we cap cm1 at the 64x128 tile because the 128x128 register pressure
-        // is brutal for the subgroup-tile coopmat layout.
+        // cm1 is used only when cm2 is unavailable; capped at 64x128 (due to shared memory size)
         bool conv2d_use_cm1 = false;
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
         conv2d_use_cm1 = !device->coopmat2 &&
@@ -4883,18 +4876,14 @@ static void ggml_vk_load_shaders(vk_device& device) {
                          s != CONV_SHAPE_128x128;
 #endif
 
-        // cm1 needs fp16 shmem padding like cm2, plus its own WG sizing so
-        // that warps_M * warps_N * subgroup_size == WG_SIZE.
-        uint32_t conv2d_WM = 16, conv2d_WN = 16;  // ignored unless cm1
+        uint32_t conv2d_WM = 16, conv2d_WN = 16;  // cm1 subgroup tile, ignored otherwise
         if (conv2d_use_cm1) {
             conv2d_SHMEM_PAD = 8;
-            // 16x16x16 fragments. Pick subgroup-tile sizes so we end up with 8
-            // subgroups per WG (i.e. WG = 8 * subgroup_size, typically 256 on
-            // NV/RDNA-32 or 512 on AMD-CDNA-64).
+            // 16x16x16 fragments; pick WM/WN to give 8 subgroups per WG
             switch (s) {
-                case CONV_SHAPE_64x32:   conv2d_WM = 16; conv2d_WN = 16; break;  // warps 4x2, cms 1x1
-                case CONV_SHAPE_64x128:  conv2d_WM = 32; conv2d_WN = 32; break;  // warps 2x4, cms 2x2
-                case CONV_SHAPE_32x256:  conv2d_WM = 32; conv2d_WN = 32; break;  // warps 1x8, cms 2x2
+                case CONV_SHAPE_64x32:   conv2d_WM = 16; conv2d_WN = 16; break;
+                case CONV_SHAPE_64x128:  conv2d_WM = 32; conv2d_WN = 32; break;
+                case CONV_SHAPE_32x256:  conv2d_WM = 32; conv2d_WN = 32; break;
                 default: break;
             }
             const uint32_t warps_M = conv2d_BS.K / conv2d_WM;
@@ -4902,21 +4891,15 @@ static void ggml_vk_load_shaders(vk_device& device) {
             conv2d_WG_SIZE         = warps_M * warps_N * device->subgroup_size;
         }
 
-        // Stage the cm2 accumulator through shmem before the global store.
-        // Wins consistently on smaller tile shapes (replaces the per-elem
-        // callback in coopMatPerElementNV with a coalesced cooperative
-        // shmem->global pass). On the 128x128 shape the Csh footprint
-        // (32 KB fp16) halves occupancy, which loses more than the better
-        // stores save on workloads big enough to use that occupancy. cm1
-        // always uses the staged path (no per-elem callback equivalent).
+        // stage cm2 accumulator through shmem for coalesced global stores;
+        // skipped on 128x128 where the extra Csh footprint hurts occupancy.
+        // cm1 always uses the staged path.
         uint32_t conv2d_csh_store = (device->coopmat2 && s != CONV_SHAPE_128x128) ? 1u : 0u;
         if (conv2d_use_cm1) {
             conv2d_csh_store = 1;
         }
 
-        // SHMEM_TYPE in the shader is fp16 on the cm2/cm1 paths (where the
-        // Csh staging buffer also lives, when csh_store==1) and fp32 on the
-        // scalar path (no Csh).
+        // shmem is fp16 on cm2/cm1 (matches Csh), fp32 on scalar
         const bool     conv2d_use_fp16_shmem = device->coopmat2 || conv2d_use_cm1;
         const uint32_t conv2d_shmem_elem_size = conv2d_use_fp16_shmem ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
         const uint32_t conv2d_csh_elems       = conv2d_csh_store ? conv2d_BS.K * conv2d_BS.NPQ : 0u;
@@ -4927,6 +4910,11 @@ static void ggml_vk_load_shaders(vk_device& device) {
             if (use_collectives) {
                 conv2d_BS.CRS = std::min(device->subgroup_size, conv2d_BS.CRS);
             }
+            // cm1's Csh allocation doesn't shrink with BS_CRS, so fall back to
+            // scalar to guarantee we fit (matters on 16 KB-shmem devices).
+            conv2d_use_cm1 = false;
+            conv2d_csh_store = 0;
+            conv2d_WM = conv2d_WN = 16;
         }
 
         std::array<uint32_t, 3> wg_denoms = { conv2d_BS.K, 1, 1 };
@@ -9412,8 +9400,7 @@ static vk_conv_shapes ggml_vk_conv_select_shape(ggml_backend_vk_context * ctx, u
     // so small convolutions will still choose a smaller tile.
     const uint32_t shader_core_count = ctx->device->shader_core_count > 0 ? ctx->device->shader_core_count : 32;
 
-    // The 128x128 tile isn't built on cm1-only devices (register pressure with
-    // subgroup-tile coopmats is prohibitive); fall through to a smaller tile.
+    // 128x128 isn't used with cm1 due to shared memory size; fall through to a smaller tile.
     bool allow_128x128 = true;
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
     if (!ctx->device->coopmat2 && ctx->device->coopmat_support && ctx->device->coopmat_acc_f16_support) {
@@ -9428,9 +9415,7 @@ static vk_conv_shapes ggml_vk_conv_select_shape(ggml_backend_vk_context * ctx, u
     } else if (K <= 64 && n_tiles(CONV_SHAPE_64x128) >= shader_core_count * 2) {
         return CONV_SHAPE_64x128;
     } else if (!allow_128x128 && K > 64 && n_tiles(CONV_SHAPE_64x128) >= shader_core_count * 2) {
-        // When 128x128 isn't built (cm1 path), large-K problems should still
-        // get the biggest available tile rather than dropping all the way to
-        // the small 64x32 fallback.
+        // cm1 fallback for large K when 128x128 isn't available
         return CONV_SHAPE_64x128;
     } else {
         return CONV_SHAPE_64x32;
@@ -9959,8 +9944,7 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             uint32_t d0 = !transpose ? (uint32_t)ggml_get_op_params_i32(dst, 4) : 1;
             uint32_t d1 = !transpose ? (uint32_t)ggml_get_op_params_i32(dst, 5) : 1;
 
-            // Detect whether K/CRS/NPQ are exact multiples of the tile sizes, so the
-            // shader can skip the corresponding bounds checks and address clamps.
+            // tile-aligned shapes let the shader skip bounds checks
             const uint32_t Cin = (uint32_t)src1->ne[2];
             const uint32_t CRS = Cin * KW * KH;
             const uint32_t BS_K   = vk_conv_block_sizes[shape].K;

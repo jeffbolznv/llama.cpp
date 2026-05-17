@@ -8,7 +8,7 @@ endif()
 
 find_package(Vulkan COMPONENTS glslc REQUIRED)
 
-if(WIN32 AND DEFINED ENV{VULKAN_SDK})
+if (DEFINED ENV{VULKAN_SDK})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
 endif()
 find_package(SPIRV-Headers CONFIG REQUIRED)

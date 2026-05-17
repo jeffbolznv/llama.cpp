@@ -4881,9 +4881,23 @@ static void ggml_vk_load_shaders(vk_device& device) {
                          s != CONV_SHAPE_128x128;
 #endif
 
+        const uint32_t conv2d_cm1_shmem_pad = 8;
+
+        auto shmem_req = [&](uint32_t pad, bool csh_store, bool fp16_shmem) {
+            const uint32_t elem_size = fp16_shmem ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
+            const uint32_t csh_elems = csh_store ? conv2d_BS.K * conv2d_BS.NPQ : 0u;
+            return (conv2d_BS.K * (conv2d_BS.CRS + pad) + conv2d_BS.CRS * (conv2d_BS.NPQ + pad) + csh_elems) * elem_size;
+        };
+
+        // coopmat1 needs to store the output through shared memory, so check up front
+        // whether it'll fit and disable it before applying coopmat1 parameters.
+        if (conv2d_use_cm1 && device->properties.limits.maxComputeSharedMemorySize < shmem_req(conv2d_cm1_shmem_pad, true, true)) {
+            conv2d_use_cm1 = false;
+        }
+
         uint32_t conv2d_WM = 16, conv2d_WN = 16;  // cm1 subgroup tile, ignored otherwise
         if (conv2d_use_cm1) {
-            conv2d_SHMEM_PAD = 8;
+            conv2d_SHMEM_PAD = conv2d_cm1_shmem_pad;
             // 16x16x16 fragments; pick WM/WN to keep WG_SIZE at 256
             // (i.e. 8 subgroups for sg=32, 4 subgroups for sg=64).
             const bool sg64 = (device->subgroup_size == 64);
@@ -4907,21 +4921,16 @@ static void ggml_vk_load_shaders(vk_device& device) {
         }
 
         // shmem is fp16 on cm2/cm1 (matches Csh), fp32 on scalar
-        const bool     conv2d_use_fp16_shmem = device->coopmat2 || conv2d_use_cm1;
-        const uint32_t conv2d_shmem_elem_size = conv2d_use_fp16_shmem ? (uint32_t)sizeof(uint16_t) : (uint32_t)sizeof(float);
-        const uint32_t conv2d_csh_elems       = conv2d_csh_store ? conv2d_BS.K * conv2d_BS.NPQ : 0u;
-        uint32_t conv2d_shmem_req =
-            (conv2d_BS.K * (conv2d_BS.CRS + conv2d_SHMEM_PAD) + conv2d_BS.CRS * (conv2d_BS.NPQ + conv2d_SHMEM_PAD) + conv2d_csh_elems) * conv2d_shmem_elem_size;
-        if (device->properties.limits.maxComputeSharedMemorySize < conv2d_shmem_req) {
+        const bool conv2d_use_fp16_shmem = device->coopmat2 || conv2d_use_cm1;
+
+        // shrink CRS if the non-cm1 config still doesn't fit
+        if (device->properties.limits.maxComputeSharedMemorySize < shmem_req(conv2d_SHMEM_PAD, conv2d_csh_store, conv2d_use_fp16_shmem)) {
+            GGML_ASSERT(!conv2d_use_cm1);
             conv2d_BS.CRS = 8;
             if (use_collectives) {
                 conv2d_BS.CRS = std::min(device->subgroup_size, conv2d_BS.CRS);
             }
-            // cm1's Csh allocation doesn't shrink with BS_CRS, so fall back to
-            // scalar to guarantee we fit (matters on 16 KB-shmem devices).
-            conv2d_use_cm1 = false;
             conv2d_csh_store = 0;
-            conv2d_WM = conv2d_WN = 16;
         }
 
         std::array<uint32_t, 3> wg_denoms = { conv2d_BS.K, 1, 1 };
@@ -9413,7 +9422,7 @@ static vk_conv_shapes ggml_vk_conv_select_shape(ggml_backend_vk_context * ctx, u
     // 128x128 isn't used with cm1 due to shared memory size; fall through to a smaller tile.
     bool allow_128x128 = true;
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
-    if (!ctx->device->coopmat2 && ctx->device->coopmat_support && ctx->device->coopmat_acc_f16_support) {
+    if (!ctx->device->coopmat2 && ctx->device->coopmat_support && ctx->device->coopmat_support_16x16x16_f16acc) {
         allow_128x128 = false;
     }
 #endif

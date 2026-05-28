@@ -159,8 +159,6 @@ struct vk_pipeline_struct {
     uint32_t align;
     // true if fields have been set by ggml_vk_create_pipeline
     bool initialized {};
-    // set to true to request the pipeline is compiled
-    std::atomic<bool> needed {};
     // true while a compile is in flight, used to dedupe concurrent claims.
     // Protected by device->compile_mutex.
     bool compile_pending {};
@@ -2568,7 +2566,6 @@ static void ggml_pipeline_request_descriptor_sets(ggml_backend_vk_context *ctx, 
     VK_LOG_DEBUG("ggml_pipeline_request_descriptor_sets(" << pipeline->name << ", " << n << ")");
     ctx->pipeline_descriptor_set_requirements += n;
     if (!pipeline->compiled) {
-        pipeline->needed = true;
         ggml_vk_load_shaders(ctx->device, pipeline);
     }
     ggml_pipeline_allocate_descriptor_sets(ctx);

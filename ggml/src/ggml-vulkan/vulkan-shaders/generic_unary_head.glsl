@@ -41,7 +41,7 @@ uint fastdiv(uint n, uint mp, uint L) {
 }
 
 uint fastdiv_L(uint packed, uint slot) {
-    return (packed >> (slot * 8)) & 0xFFu;
+    return (packed >> (slot * 8)) & 0x3Fu;
 }
 
 uint src0_idx(uint idx) {

@@ -8233,7 +8233,6 @@ static void ggml_vk_cpy_to_strided(
         uint32_t nb10, uint32_t nb11, uint32_t nb12, uint32_t nb13) {
     VK_LOG_DEBUG("ggml_vk_cpy_to_strided((" << tensor << ", type=" << tensor->type << ", ne0=" << tensor->ne[0] << ", ne1=" << tensor->ne[1] << ", ne2=" << tensor->ne[2] << ", ne3=" << tensor->ne[3] << ", nb0=" << tensor->nb[0] << ", nb1=" << tensor->nb[1] << ", nb2=" << tensor->nb[2] << ", nb3=" << tensor->nb[3] << "), ";
     std::cerr << "dst_nb=(" << nb10 << ", " << nb11 << ", " << nb12 << ", " << nb13 << "), buffer in size=" << in.buffer->size << ", buffer out size=" << out.buffer->size << ")");
-    const int tensor_type_size = ggml_type_size(tensor->type);
 
     const uint32_t ne = ggml_nelements(tensor);
     std::array<uint32_t, 3> elements;
@@ -8246,14 +8245,11 @@ static void ggml_vk_cpy_to_strided(
         elements = { ne, 1, 1 };
     }
 
-    vk_op_unary_push_constants pc = {
-        (uint32_t)ne,
-        (uint32_t)tensor->ne[0], (uint32_t)tensor->ne[1], (uint32_t)tensor->ne[2], (uint32_t)tensor->ne[3], (uint32_t)tensor->nb[0] / tensor_type_size, (uint32_t)tensor->nb[1] / tensor_type_size, (uint32_t)tensor->nb[2] / tensor_type_size, (uint32_t)tensor->nb[3] / tensor_type_size,
-        (uint32_t)tensor->ne[0], (uint32_t)tensor->ne[1], (uint32_t)tensor->ne[2], (uint32_t)tensor->ne[3], nb10, nb11, nb12, nb13,
-        0,
-        0.0f, 0.0f,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    };
+    vk_op_unary_push_constants pc = vk_op_unary_push_constants_init(tensor, tensor, ne);
+    pc.nb10 = nb10;
+    pc.nb11 = nb11;
+    pc.nb12 = nb12;
+    pc.nb13 = nb13;
     init_pushconst_fastdiv(pc);
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { in, out }, pc, elements);
     ggml_vk_sync_buffers(ctx, subctx);

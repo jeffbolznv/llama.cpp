@@ -110,7 +110,7 @@ float op_xielu(float x) {
     }
 
     const float min_x_eps = min(x, eps);
-    return (exp(min_x_eps) - 1.0f - x) * alpha_n + beta * x;
+    return (op_expm1(min_x_eps) - x) * alpha_n + beta * x;
 }
 
 float op_floor(float x) {

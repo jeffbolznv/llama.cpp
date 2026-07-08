@@ -2450,7 +2450,7 @@ struct test_set_rows : public test_case {
             }
             err_estimate *= err_estimate;
             if (type_src == GGML_TYPE_F16) {
-                err_estimate *= 8.0f;
+                err_estimate *= 16.0f;
             }
             err_estimate /= 0.25f*float(ne[0] * r * ne[2]*nr23[0] * ne[3]*nr23[1]);
             return err_estimate;

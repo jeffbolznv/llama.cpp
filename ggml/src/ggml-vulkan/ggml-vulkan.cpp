@@ -630,7 +630,10 @@ static constexpr uint32_t num_topk_pipelines = 11;
 static constexpr uint32_t topk_global_radix_bits = 5;
 static constexpr uint32_t topk_global_num_buckets = 1u << topk_global_radix_bits;
 static constexpr uint32_t topk_global_num_passes = (32 + topk_global_radix_bits - 1) / topk_global_radix_bits;
-static constexpr uint32_t topk_global_chunk_size = 256;
+static constexpr uint32_t topk_global_items_per_thread[] = { 2, 4, 8 };
+static constexpr uint32_t num_topk_global_pipelines = sizeof(topk_global_items_per_thread) / sizeof(topk_global_items_per_thread[0]);
+static constexpr uint32_t topk_global_default_pipeline = 0;
+static constexpr uint32_t topk_global_max_auto_pipeline = 2;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
@@ -1061,8 +1064,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_argsort_f32[num_argsort_pipelines];
     vk_pipeline pipeline_argsort_large_f32[num_argsort_pipelines];
     vk_pipeline pipeline_topk_f32[num_topk_pipelines];
-    vk_pipeline pipeline_topk_global_f32;
-    vk_pipeline pipeline_topk_global_subgroup_f32;
+    vk_pipeline pipeline_topk_global_f32[num_topk_global_pipelines];
+    vk_pipeline pipeline_topk_global_subgroup_f32[num_topk_global_pipelines];
     vk_pipeline pipeline_sum_rows_f32;
     vk_pipeline pipeline_cross_entropy_loss_f32, pipeline_cross_entropy_loss_f32_wg512;
     vk_pipeline pipeline_cross_entropy_loss_back_f32, pipeline_cross_entropy_loss_back_f32_wg512;
@@ -5827,12 +5830,16 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     }
 
     const uint32_t topk_global_block_size = 1u << std::min(device->max_workgroup_size_log2, 7u);
-    const uint32_t topk_global_items_per_thread = topk_global_chunk_size / topk_global_block_size;
-    ggml_vk_create_pipeline2(device, device->pipeline_topk_global_f32, "topk_global_f32", topk_global_f32_len, topk_global_f32_data, "main", 3, sizeof(vk_op_topk_global_push_constants), {topk_global_chunk_size, 1, 1},
-                             {topk_global_block_size, topk_global_items_per_thread}, 1, true);
-    if (device->subgroup_basic && device->subgroup_arithmetic && device->subgroup_ballot && device->subgroup_require_full_support && device->subgroup_size >= topk_global_num_buckets) {
-        ggml_vk_create_pipeline2(device, device->pipeline_topk_global_subgroup_f32, "topk_global_subgroup_f32", topk_global_subgroup_f32_len, topk_global_subgroup_f32_data, "main", 3,
-                                 sizeof(vk_op_topk_global_push_constants), {topk_global_chunk_size, 1, 1}, {topk_global_block_size, topk_global_items_per_thread}, 1, true, true, device->subgroup_size);
+    for (uint32_t i = 0; i < num_topk_global_pipelines; ++i) {
+        const uint32_t items_per_thread = topk_global_items_per_thread[i];
+        const uint32_t chunk_size = topk_global_block_size * items_per_thread;
+        const std::string suffix = "_i" + std::to_string(items_per_thread);
+        ggml_vk_create_pipeline2(device, device->pipeline_topk_global_f32[i], "topk_global_f32" + suffix, topk_global_f32_len, topk_global_f32_data, "main", 3,
+                                 sizeof(vk_op_topk_global_push_constants), {chunk_size, 1, 1}, {topk_global_block_size, items_per_thread}, 1, true);
+        if (device->subgroup_basic && device->subgroup_arithmetic && device->subgroup_ballot && device->subgroup_require_full_support && device->subgroup_size >= topk_global_num_buckets) {
+            ggml_vk_create_pipeline2(device, device->pipeline_topk_global_subgroup_f32[i], "topk_global_subgroup_f32" + suffix, topk_global_subgroup_f32_len, topk_global_subgroup_f32_data, "main", 3,
+                                     sizeof(vk_op_topk_global_push_constants), {chunk_size, 1, 1}, {topk_global_block_size, items_per_thread}, 1, true, true, device->subgroup_size);
+        }
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_argmax_f32, "argmax_f32", argmax_f32_len, argmax_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
@@ -13971,7 +13978,17 @@ static void ggml_vk_topk_global(ggml_backend_vk_context * ctx, vk_context& subct
     vk_subbuffer src_buf = ggml_vk_tensor_subbuffer(ctx, src0);
     vk_subbuffer scratch_buf = { ctx->prealloc_x, 0, scratch_size };
     vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
-    vk_pipeline pipeline = ctx->device->pipeline_topk_global_subgroup_f32 ? ctx->device->pipeline_topk_global_subgroup_f32 : ctx->device->pipeline_topk_global_f32;
+    uint32_t pipeline_index = topk_global_default_pipeline;
+    const uint64_t min_workgroups = 4ull * std::max(1u, ctx->device->shader_core_count);
+    for (uint32_t i = topk_global_max_auto_pipeline; i > topk_global_default_pipeline; --i) {
+        vk_pipeline candidate = ctx->device->pipeline_topk_global_subgroup_f32[i] ? ctx->device->pipeline_topk_global_subgroup_f32[i] : ctx->device->pipeline_topk_global_f32[i];
+        const uint64_t workgroups = uint64_t(nrows) * ((ncols + candidate->wg_denoms[0] - 1) / candidate->wg_denoms[0]);
+        if (workgroups >= min_workgroups) {
+            pipeline_index = i;
+            break;
+        }
+    }
+    vk_pipeline pipeline = ctx->device->pipeline_topk_global_subgroup_f32[pipeline_index] ? ctx->device->pipeline_topk_global_subgroup_f32[pipeline_index] : ctx->device->pipeline_topk_global_f32[pipeline_index];
     GGML_ASSERT(pipeline);
 
     subctx->s->buffer->buf.fillBuffer(scratch_buf.buffer->buffer, scratch_buf.offset, scratch_buf.size, 0);
@@ -18792,7 +18809,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 uint32_t min_pipeline = (uint32_t)log2f(float(op->ne[0])) + 1;
                 if (min_pipeline >= num_topk_pipelines ||
                     !device->pipeline_topk_f32[min_pipeline]) {
-                    return device->pipeline_topk_global_subgroup_f32 != nullptr || device->pipeline_topk_global_f32 != nullptr;
+                    return device->pipeline_topk_global_subgroup_f32[topk_global_default_pipeline] != nullptr || device->pipeline_topk_global_f32[topk_global_default_pipeline] != nullptr;
                 }
             }
             return true;

@@ -10476,6 +10476,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {200000, 16, 1, 1}));
 
     test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2, 1, 1, 1}, 1));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {16384,   1, 1, 1}, 2051));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {16384, 512, 1, 1}, 2051));
     // widths around the tiling threshold
     for (auto cols : {4096, 8192, 12288, 16384, 24576, 32768, 65536, 131072}) {
         for (auto nrows : {1, 16}) {

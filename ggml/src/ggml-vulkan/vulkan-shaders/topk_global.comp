@@ -1,0 +1,293 @@
+#version 450
+
+#if USE_SUBGROUP
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+#endif
+
+#include "types.glsl"
+
+layout(constant_id = 0) const int BLOCK_SIZE = 128;
+layout(constant_id = 1) const int ITEMS_PER_THREAD = 2;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A {A_TYPE data_a[];};
+layout (binding = 1) buffer S {uint data_s[];};
+layout (binding = 2) writeonly buffer D {int data_d[];};
+
+layout (push_constant) uniform parameter {
+    uint ncols;
+    uint k;
+    uint nrows;
+    uint pass;
+} p;
+
+const uint RADIX_BITS = 5;
+const uint NUM_BUCKETS = 1 << RADIX_BITS;
+const uint NUM_PASSES = (32 + RADIX_BITS - 1) / RADIX_BITS;
+const uint LAST_BITS = 32 - (NUM_PASSES - 1) * RADIX_BITS;
+const uint CHUNK_SIZE = BLOCK_SIZE * ITEMS_PER_THREAD;
+
+shared uint histogram[NUM_BUCKETS];
+#if !USE_SUBGROUP
+shared uint scan_values[BLOCK_SIZE];
+shared uint scan_total;
+#endif
+shared uint selected_prefix;
+shared uint selected_rank;
+shared uint selected_greater;
+shared uint output_greater_base;
+shared uint output_equal_base;
+#if USE_SUBGROUP
+shared uint subgroup_greater_counts[BLOCK_SIZE];
+shared uint subgroup_equal_counts[BLOCK_SIZE];
+#endif
+
+uint float_key(float x) {
+    uint y = floatBitsToUint(x);
+    return (y & 0x80000000) != 0 ? ~y : y | 0x80000000;
+}
+
+uint histogram_index(uint row, uint pass, uint bucket) {
+    return (row * NUM_PASSES + pass) * NUM_BUCKETS + bucket;
+}
+
+uint state_index(uint row, uint slot) {
+    return p.nrows * NUM_PASSES * NUM_BUCKETS + row * 6 + slot * 3;
+}
+
+uint counter_index(uint row) {
+    return p.nrows * (NUM_PASSES * NUM_BUCKETS + 6) + row * 2;
+}
+
+void find_next_prefix(uint row, uint num_passes) {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid == 0) {
+        selected_prefix = 0;
+        selected_rank = p.k;
+        selected_greater = 0;
+
+        if (num_passes > 1) {
+            uint state = state_index(row, (num_passes - 2) & 1);
+            selected_prefix = data_s[state];
+            selected_rank = data_s[state + 1];
+            selected_greater = data_s[state + 2];
+        }
+    }
+    barrier();
+
+    if (num_passes == 0) {
+        return;
+    }
+
+    uint pass = num_passes - 1;
+    uint shift = pass == NUM_PASSES - 1 ? 0 : 32 - (pass + 1) * RADIX_BITS;
+#if USE_SUBGROUP
+    if (gl_SubgroupID == 0) {
+        uint lane = gl_SubgroupInvocationID;
+        uint prefix = 0;
+        uint rank = 0;
+        uint greater = 0;
+        if (lane == 0) {
+            prefix = selected_prefix;
+            rank = selected_rank;
+            greater = selected_greater;
+        }
+        prefix = subgroupBroadcastFirst(prefix);
+        rank = subgroupBroadcastFirst(rank);
+        greater = subgroupBroadcastFirst(greater);
+        for (uint base = 0; base < NUM_BUCKETS; base += gl_SubgroupSize) {
+            uint bucket_index = base + lane;
+            uint count = bucket_index < NUM_BUCKETS ? data_s[histogram_index(row, pass, NUM_BUCKETS - 1 - bucket_index)] : 0;
+            uint sum = subgroupInclusiveAdd(count);
+            uint total = subgroupAdd(count);
+            uvec4 candidates = subgroupBallot(bucket_index < NUM_BUCKETS && sum >= rank);
+            if (subgroupBallotBitCount(candidates) != 0) {
+                uint selected_lane = subgroupBallotFindLSB(candidates);
+                uint above = subgroupBroadcast(sum - count, selected_lane);
+                prefix |= (NUM_BUCKETS - 1 - (base + selected_lane)) << shift;
+                rank -= above;
+                greater += above;
+                break;
+            }
+            rank -= total;
+            greater += total;
+        }
+        if (lane == 0) {
+            selected_prefix = prefix;
+            selected_rank = rank;
+            selected_greater = greater;
+        }
+    }
+#else
+    if (tid == 0) {
+        for (int bucket = int(NUM_BUCKETS) - 1; bucket >= 0; --bucket) {
+            uint count = data_s[histogram_index(row, pass, uint(bucket))];
+            if (selected_rank > count) {
+                selected_rank -= count;
+                selected_greater += count;
+            } else {
+                selected_prefix |= uint(bucket) << shift;
+                break;
+            }
+        }
+    }
+#endif
+    barrier();
+}
+
+#if !USE_SUBGROUP
+uint workgroup_exclusive_scan(uint value) {
+    uint tid = gl_LocalInvocationID.x;
+    scan_values[tid] = value;
+    barrier();
+
+    for (uint offset = 1; offset < BLOCK_SIZE; offset <<= 1) {
+        uint add = tid >= offset ? scan_values[tid - offset] : 0;
+        barrier();
+        scan_values[tid] += add;
+        barrier();
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        scan_total = scan_values[tid];
+    }
+    uint result = scan_values[tid] - value;
+    barrier();
+    return result;
+}
+#endif
+
+void count_pass(uint row) {
+    uint tid = gl_LocalInvocationID.x;
+    for (uint bucket = tid; bucket < NUM_BUCKETS; bucket += BLOCK_SIZE) {
+        histogram[bucket] = 0;
+    }
+
+    find_next_prefix(row, p.pass);
+    if (p.pass > 0 && tid == 0 && gl_WorkGroupID.x == 0) {
+        uint state = state_index(row, (p.pass - 1) & 1);
+        data_s[state] = selected_prefix;
+        data_s[state + 1] = selected_rank;
+        data_s[state + 2] = selected_greater;
+    }
+
+    uint prefix_mask = 0;
+    if (p.pass > 0) {
+        prefix_mask = ~0u << (32 - p.pass * RADIX_BITS);
+    }
+    uint shift = p.pass == NUM_PASSES - 1 ? 0 : 32 - (p.pass + 1) * RADIX_BITS;
+    uint bucket_mask = p.pass == NUM_PASSES - 1 ? (1u << LAST_BITS) - 1 : NUM_BUCKETS - 1;
+    uint chunk_base = gl_WorkGroupID.x * CHUNK_SIZE;
+
+    for (uint item = 0; item < ITEMS_PER_THREAD; ++item) {
+        uint col = chunk_base + item * BLOCK_SIZE + tid;
+        if (col < p.ncols) {
+            uint key = float_key(data_a[row * p.ncols + col]);
+            if (p.pass == 0 || (key & prefix_mask) == selected_prefix) {
+                atomicAdd(histogram[(key >> shift) & bucket_mask], 1);
+            }
+        }
+    }
+    barrier();
+
+    for (uint bucket = tid; bucket < NUM_BUCKETS; bucket += BLOCK_SIZE) {
+        if (histogram[bucket] != 0) {
+            atomicAdd(data_s[histogram_index(row, p.pass, bucket)], histogram[bucket]);
+        }
+    }
+}
+
+void compact_pass(uint row) {
+    uint tid = gl_LocalInvocationID.x;
+    find_next_prefix(row, NUM_PASSES);
+
+    uint chunk_base = gl_WorkGroupID.x * CHUNK_SIZE;
+    uint keys[ITEMS_PER_THREAD];
+    uint greater_count = 0;
+    uint equal_count = 0;
+    for (uint item = 0; item < ITEMS_PER_THREAD; ++item) {
+        uint col = chunk_base + item * BLOCK_SIZE + tid;
+        keys[item] = col < p.ncols ? float_key(data_a[row * p.ncols + col]) : 0;
+        greater_count += col < p.ncols && keys[item] > selected_prefix ? 1 : 0;
+        equal_count += col < p.ncols && keys[item] == selected_prefix ? 1 : 0;
+    }
+
+#if USE_SUBGROUP
+    uint greater_offset = subgroupExclusiveAdd(greater_count);
+    uint equal_offset = subgroupExclusiveAdd(equal_count);
+    uint subgroup_greater = subgroupAdd(greater_count);
+    uint subgroup_equal = subgroupAdd(equal_count);
+    if (subgroupElect()) {
+        subgroup_greater_counts[gl_SubgroupID] = subgroup_greater;
+        subgroup_equal_counts[gl_SubgroupID] = subgroup_equal;
+    }
+    barrier();
+
+    if (tid == 0) {
+        uint greater_total = 0;
+        uint equal_total = 0;
+        for (uint subgroup = 0; subgroup < gl_NumSubgroups; ++subgroup) {
+            uint next_greater = greater_total + subgroup_greater_counts[subgroup];
+            uint next_equal = equal_total + subgroup_equal_counts[subgroup];
+            subgroup_greater_counts[subgroup] = greater_total;
+            subgroup_equal_counts[subgroup] = equal_total;
+            greater_total = next_greater;
+            equal_total = next_equal;
+        }
+        uint counters = counter_index(row);
+        output_greater_base = atomicAdd(data_s[counters], greater_total);
+        output_equal_base = atomicAdd(data_s[counters + 1], equal_total);
+    }
+    barrier();
+    greater_offset += subgroup_greater_counts[gl_SubgroupID];
+    equal_offset += subgroup_equal_counts[gl_SubgroupID];
+#else
+    uint greater_offset = workgroup_exclusive_scan(greater_count);
+    uint workgroup_greater = scan_total;
+    uint equal_offset = workgroup_exclusive_scan(equal_count);
+    uint workgroup_equal = scan_total;
+
+    if (tid == 0) {
+        uint counters = counter_index(row);
+        output_greater_base = atomicAdd(data_s[counters], workgroup_greater);
+        output_equal_base = atomicAdd(data_s[counters + 1], workgroup_equal);
+    }
+    barrier();
+#endif
+
+    uint local_greater = 0;
+    uint local_equal = 0;
+    for (uint item = 0; item < ITEMS_PER_THREAD; ++item) {
+        uint col = chunk_base + item * BLOCK_SIZE + tid;
+        if (col >= p.ncols) {
+            continue;
+        }
+        if (keys[item] > selected_prefix) {
+            uint output_idx = output_greater_base + greater_offset + local_greater++;
+            if (output_idx < selected_greater) {
+                data_d[row * p.k + output_idx] = int(col);
+            }
+        } else if (keys[item] == selected_prefix) {
+            uint output_idx = output_equal_base + equal_offset + local_equal++;
+            if (output_idx < selected_rank) {
+                data_d[row * p.k + selected_greater + output_idx] = int(col);
+            }
+        }
+    }
+}
+
+void main() {
+    uint row = gl_WorkGroupID.y;
+    while (row < p.nrows) {
+        if (p.pass < NUM_PASSES) {
+            count_pass(row);
+        } else {
+            compact_pass(row);
+        }
+        barrier();
+        row += gl_NumWorkGroups.y;
+    }
+}

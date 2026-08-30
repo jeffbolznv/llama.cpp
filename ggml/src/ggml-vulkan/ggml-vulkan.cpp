@@ -626,6 +626,11 @@ enum shader_reduction_mode {
 static constexpr uint32_t num_argsort_pipelines = 11;
 static constexpr uint32_t num_topk_moe_pipelines = 10;
 static constexpr uint32_t num_topk_pipelines = 11;
+// Keep these values in sync with topk_global.comp.
+static constexpr uint32_t topk_global_radix_bits = 5;
+static constexpr uint32_t topk_global_num_buckets = 1u << topk_global_radix_bits;
+static constexpr uint32_t topk_global_num_passes = (32 + topk_global_radix_bits - 1) / topk_global_radix_bits;
+static constexpr uint32_t topk_global_chunk_size = 256;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
@@ -1056,6 +1061,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_argsort_f32[num_argsort_pipelines];
     vk_pipeline pipeline_argsort_large_f32[num_argsort_pipelines];
     vk_pipeline pipeline_topk_f32[num_topk_pipelines];
+    vk_pipeline pipeline_topk_global_f32;
+    vk_pipeline pipeline_topk_global_subgroup_f32;
     vk_pipeline pipeline_sum_rows_f32;
     vk_pipeline pipeline_cross_entropy_loss_f32, pipeline_cross_entropy_loss_f32_wg512;
     vk_pipeline pipeline_cross_entropy_loss_back_f32, pipeline_cross_entropy_loss_back_f32_wg512;
@@ -1746,6 +1753,13 @@ struct vk_op_topk_push_constants {
     uint32_t nrows;
     uint32_t first_pass;
     uint32_t last_pass;
+};
+
+struct vk_op_topk_global_push_constants {
+    uint32_t ncols;
+    uint32_t k;
+    uint32_t nrows;
+    uint32_t pass;
 };
 
 struct vk_op_im2col_push_constants {
@@ -5810,6 +5824,15 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 ggml_vk_create_pipeline2(device, device->pipeline_topk_f32[i], "topk_f32_"+std::to_string(i), topk_argsort_f32_len, topk_argsort_f32_data, "main", 2, sizeof(vk_op_topk_push_constants), {BLOCK_SIZE, 1, 1}, {BLOCK_SIZE, NCOLS_PADDED_LOG2}, 1, true);
             }
         }
+    }
+
+    const uint32_t topk_global_block_size = 1u << std::min(device->max_workgroup_size_log2, 7u);
+    const uint32_t topk_global_items_per_thread = topk_global_chunk_size / topk_global_block_size;
+    ggml_vk_create_pipeline2(device, device->pipeline_topk_global_f32, "topk_global_f32", topk_global_f32_len, topk_global_f32_data, "main", 3, sizeof(vk_op_topk_global_push_constants), {topk_global_chunk_size, 1, 1},
+                             {topk_global_block_size, topk_global_items_per_thread}, 1, true);
+    if (device->subgroup_basic && device->subgroup_arithmetic && device->subgroup_ballot && device->subgroup_require_full_support && device->subgroup_size >= topk_global_num_buckets) {
+        ggml_vk_create_pipeline2(device, device->pipeline_topk_global_subgroup_f32, "topk_global_subgroup_f32", topk_global_subgroup_f32_len, topk_global_subgroup_f32_data, "main", 3,
+                                 sizeof(vk_op_topk_global_push_constants), {topk_global_chunk_size, 1, 1}, {topk_global_block_size, topk_global_items_per_thread}, 1, true, true, device->subgroup_size);
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_argmax_f32, "argmax_f32", argmax_f32_len, argmax_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
@@ -13931,10 +13954,59 @@ static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, c
     }
 }
 
+static void ggml_vk_topk_global(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+    const uint32_t ncols = src0->ne[0];
+    const uint32_t nrows = ggml_nrows(src0);
+    const uint32_t k = dst->ne[0];
+    const size_t scratch_size = size_t{nrows} * (topk_global_num_passes * topk_global_num_buckets + 8) * sizeof(uint32_t);
+
+    if (ctx->prealloc_size_x < scratch_size) {
+        ctx->prealloc_size_x = scratch_size;
+        ggml_vk_preallocate_buffers(ctx, subctx);
+    }
+    if (ctx->prealloc_x_need_sync) {
+        ggml_vk_sync_buffers(ctx, subctx);
+    }
+
+    vk_subbuffer src_buf = ggml_vk_tensor_subbuffer(ctx, src0);
+    vk_subbuffer scratch_buf = { ctx->prealloc_x, 0, scratch_size };
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
+    vk_pipeline pipeline = ctx->device->pipeline_topk_global_subgroup_f32 ? ctx->device->pipeline_topk_global_subgroup_f32 : ctx->device->pipeline_topk_global_f32;
+    GGML_ASSERT(pipeline);
+
+    subctx->s->buffer->buf.fillBuffer(scratch_buf.buffer->buffer, scratch_buf.offset, scratch_buf.size, 0);
+    ggml_vk_sync_buffers(ctx, subctx);
+
+    std::array<uint32_t, 3> elements = {
+        ncols,
+        std::min(nrows, ctx->device->properties.limits.maxComputeWorkGroupCount[1]),
+        1,
+    };
+    vk_op_topk_global_push_constants pc { ncols, k, nrows, 0 };
+
+    for (uint32_t pass = 0; pass < topk_global_num_passes; ++pass) {
+        pc.pass = pass;
+        ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, scratch_buf, dst_buf }, pc, elements);
+        ggml_vk_sync_buffers(ctx, subctx);
+    }
+
+    pc.pass = topk_global_num_passes;
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, scratch_buf, dst_buf }, pc, elements);
+    ctx->prealloc_x_need_sync = true;
+}
+
 static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
     uint32_t ncols = src0->ne[0];
     uint32_t nrows = ggml_nrows(src0);
     uint32_t k = dst->ne[0];
+
+    uint32_t min_pipeline = (uint32_t)log2f(float(k)) + 1;
+    if (min_pipeline >= num_topk_pipelines || !ctx->device->pipeline_topk_f32[min_pipeline]) {
+        ggml_vk_topk_global(ctx, subctx, src0, dst);
+        return;
+    }
 
     vk_op_topk_push_constants pc { ncols, ncols, ncols, k, nrows, 0, 0 };
 
@@ -18717,12 +18789,10 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 if (!ggml_is_contiguous(op) || !ggml_is_contiguous(op->src[0])) {
                     return false;
                 }
-                // We could potentially support larger, using argsort to sort the
-                // whole thing. Not clear if this is needed.
                 uint32_t min_pipeline = (uint32_t)log2f(float(op->ne[0])) + 1;
                 if (min_pipeline >= num_topk_pipelines ||
                     !device->pipeline_topk_f32[min_pipeline]) {
-                    return false;
+                    return device->pipeline_topk_global_subgroup_f32 != nullptr || device->pipeline_topk_global_f32 != nullptr;
                 }
             }
             return true;

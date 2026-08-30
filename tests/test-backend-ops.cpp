@@ -9723,6 +9723,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {1024, 1, 1, 1}, 1024));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2048, 2, 1, 1}, 1024));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2048, 2, 1, 1}, 2048, true));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {4096, 1, 1, 1}, 2048));
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {8192, 2, 1, 1}, 2051, true));
     for (int k : {4, 8, 16, 32}) {
         for (int nrows : {1, 8, 16}) {
             test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {202048, nrows, 1, 1}, k));
@@ -10477,10 +10482,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {cols, nrows, 1, 1}, 16));
         }
     }
-    for (auto k : {1, 4, 8, 10, 16, 32, 40, 400}) {
+    for (auto k : {1, 4, 8, 10, 16, 32, 40, 400, 2048, 9999}) {
         for (auto nrows : {1, 16}) {
             for (auto cols : {k, 1000, 65000, 200000}) {
-                test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {cols, nrows, 1, 1}, k));
+                if (cols >= k) {
+                    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {cols, nrows, 1, 1}, k));
+                }
             }
         }
     }

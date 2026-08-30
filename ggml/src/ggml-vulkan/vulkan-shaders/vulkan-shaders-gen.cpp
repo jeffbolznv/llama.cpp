@@ -1025,6 +1025,8 @@ void process_shaders() {
     string_to_spv("argsort_large_f32", "argsort_large.comp", {{"A_TYPE", "float"}});
 
     string_to_spv("topk_argsort_f32", "topk_argsort.comp", {{"A_TYPE", "float"}});
+    string_to_spv("topk_global_f32", "topk_global.comp", {{"A_TYPE", "float"}, {"USE_SUBGROUP", "0"}});
+    string_to_spv("topk_global_subgroup_f32", "topk_global.comp", {{"A_TYPE", "float"}, {"USE_SUBGROUP", "1"}});
     string_to_spv("topk_nary_search_f32", "topk_nary_search.comp", {{"A_TYPE", "float"}});
 
     string_to_spv("argmax_f32", "argmax.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "int"}}));

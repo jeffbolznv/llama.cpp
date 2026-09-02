@@ -2488,31 +2488,38 @@ static uint64_t vk_tensor_offset(const ggml_tensor * tensor) {
     return (uint8_t *) tensor->data - (uint8_t *) vk_ptr_base;
 }
 
-static size_t ggml_vk_tensor_physical_offset(const ggml_backend_vk_context * ctx, const ggml_tensor * t) {
+static void ggml_vk_host_get(const vk_device& device, const void * ptr, vk_buffer& buf, size_t& buf_offset);
+
+static size_t ggml_vk_tensor_buffer_offset(const ggml_backend_vk_context * ctx, const ggml_tensor * t) {
+    // vk_tensor_offset() is relative to vk_ptr_base, but mapped host tensors need an offset relative to their Vulkan buffer.
     if (ctx->device->uma) {
         vk_buffer buf = nullptr;
         size_t off = 0;
         ggml_vk_host_get(ctx->device, t->data, buf, off);
-        return off;
+        if (buf) {
+            return off;
+        }
     }
     return (size_t)(vk_tensor_offset(t) + t->view_offs);
 }
 
-static uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t)
-{
-    return (ggml_vk_tensor_physical_offset(ctx, t) & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1));
+static size_t ggml_vk_descriptor_offset(size_t tensor_offset, size_t alignment, size_t type_size) {
+    // Move the descriptor back until its distance to the tensor is divisible by the tensor type size.
+    size_t descriptor_offset = tensor_offset & ~(alignment - 1);
+    while ((tensor_offset - descriptor_offset) % type_size != 0) {
+        GGML_ASSERT(descriptor_offset >= alignment);
+        descriptor_offset -= alignment;
+    }
+
+    return descriptor_offset;
 }
 
-static uint32_t ggml_vk_get_adjusted_misalign(const ggml_backend_vk_context * ctx, const ggml_tensor * t)
-{
-    const size_t offset = ggml_vk_tensor_physical_offset(ctx, t);
-    const size_t align = ctx->device->properties.limits.minStorageBufferOffsetAlignment;
-    const size_t ts = ggml_type_size(t->type);
-    size_t misalign = offset & (align - 1);
-    while (misalign > 0 && misalign % ts != 0) {
-        misalign += align;
-    }
-    return (uint32_t)misalign;
+static uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t) {
+    const size_t tensor_offset = ggml_vk_tensor_buffer_offset(ctx, t);
+    const size_t descriptor_offset = ggml_vk_descriptor_offset(
+        tensor_offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_type_size(t->type));
+    GGML_ASSERT(tensor_offset - descriptor_offset <= UINT32_MAX);
+    return tensor_offset - descriptor_offset;
 }
 
 static uint32_t ggml_vk_concat_unit_size(ggml_type type) {
@@ -8217,7 +8224,7 @@ static void ggml_vk_host_get(const vk_device& device, const void * ptr, vk_buffe
 }
 
 static vk_subbuffer ggml_vk_tensor_subbuffer(
-    const ggml_backend_vk_context * ctx, const ggml_tensor * tensor, bool allow_misalign = false, bool use_view_offs = true) {
+    const ggml_backend_vk_context * ctx, const ggml_tensor * tensor, bool allow_misalign = false) {
 
     vk_buffer buffer = nullptr;
     size_t offset = 0;
@@ -8227,29 +8234,18 @@ static vk_subbuffer ggml_vk_tensor_subbuffer(
     if (!buffer) {
         auto buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
         buffer = buf_ctx->dev_buffer;
-    }
-
-    if (use_view_offs) {
-        if (!ctx->device->uma) {
-            offset = vk_tensor_offset(tensor) + tensor->view_offs;
-        }
-    } else {
-        const size_t physical = ggml_vk_tensor_physical_offset(ctx, tensor);
-        const size_t misalign = ggml_vk_get_adjusted_misalign(ctx, tensor);
-        GGML_ASSERT(physical >= misalign);
-        offset = physical - misalign;
+        offset = vk_tensor_offset(tensor) + tensor->view_offs;
     }
     GGML_ASSERT(buffer != nullptr);
 
     size_t size = ggml_nbytes(tensor);
-    if (!use_view_offs) {
-        size += ggml_vk_get_adjusted_misalign(ctx, tensor);
-    }
 
-    size_t misalign_bytes = offset & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
+    const size_t descriptor_offset = ggml_vk_descriptor_offset(
+        offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_type_size(tensor->type));
+    const size_t misalign_bytes = offset - descriptor_offset;
     // The shader must support misaligned offsets when indexing into the buffer
     GGML_ASSERT(allow_misalign || misalign_bytes == 0);
-    offset &= ~misalign_bytes;
+    offset = descriptor_offset;
     size += misalign_bytes;
 
     return vk_subbuffer{buffer, offset, size};
@@ -12133,9 +12129,9 @@ template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk
 }
 
 template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_binary_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
-    const uint32_t a_offset = ggml_vk_get_adjusted_misalign(ctx, src0) / ggml_type_size(src0->type);
-    const uint32_t b_offset = src1 != nullptr ? ggml_vk_get_adjusted_misalign(ctx, src1) / ggml_type_size(src1->type) : 0;
-    const uint32_t d_offset = ggml_vk_get_adjusted_misalign(ctx, dst) / ggml_type_size(dst->type);
+    const uint32_t a_offset = get_misalign_bytes(ctx, src0) / ggml_type_size(src0->type);
+    const uint32_t b_offset = get_misalign_bytes(ctx, src1) / ggml_type_size(src1->type);
+    const uint32_t d_offset = get_misalign_bytes(ctx, dst) / ggml_type_size(dst->type);
 
     GGML_ASSERT(a_offset <= 0xFFFF);
     GGML_ASSERT(b_offset <= 0xFF);
@@ -12225,12 +12221,11 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
 
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
 
-    constexpr bool is_binary = std::is_same_v<std::remove_cv_t<std::remove_reference_t<PC>>, vk_op_binary_push_constants>;
-    vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0, true, !is_binary);
-    vk_subbuffer src1_buf = use_src1 ? ggml_vk_tensor_subbuffer(ctx, src1, true, !is_binary) : vk_subbuffer{};
-    vk_subbuffer src2_buf = use_src2 ? ggml_vk_tensor_subbuffer(ctx, src2, true, !is_binary) : vk_subbuffer{};
-    vk_subbuffer src3_buf = use_src3 ? ggml_vk_tensor_subbuffer(ctx, src3, true, !is_binary) : vk_subbuffer{};
-    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true, !is_binary);
+    vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0, true);
+    vk_subbuffer src1_buf = use_src1 ? ggml_vk_tensor_subbuffer(ctx, src1, true) : vk_subbuffer{};
+    vk_subbuffer src2_buf = use_src2 ? ggml_vk_tensor_subbuffer(ctx, src2, true) : vk_subbuffer{};
+    vk_subbuffer src3_buf = use_src3 ? ggml_vk_tensor_subbuffer(ctx, src3, true) : vk_subbuffer{};
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
 
     // Compute misalignment offset for descriptors and store it in in push constants.
     init_pushconst_tensor_offsets(ctx, pc, src0, src1, src2, src3, dst);

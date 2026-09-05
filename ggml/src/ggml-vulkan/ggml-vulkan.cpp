@@ -5420,8 +5420,9 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             bool prefer_large = tiles_m > shader_core_count || tiles_l > shader_core_count ||
                                 (tiles_l <= shader_core_count / 3 && tiles_m > shader_core_count / 2);
             if (n > crossover_large && prefer_large) return last;
-            uint32_t crossover_medium = configs[0].unaligned->wg_denoms[1];
-            if (n > crossover_medium) return 1;
+            uint32_t crossover_medium_m = configs[0].unaligned->wg_denoms[0];
+            uint32_t crossover_medium_n = configs[0].unaligned->wg_denoms[1];
+            if (m > crossover_medium_m && n > crossover_medium_n) return 1;
             return 0;
         };
         device->matmul_id_tile_selector = [](uint32_t /*m*/, uint32_t n, uint32_t /*k*/, uint32_t /*shader_core_count*/,
@@ -8907,7 +8908,7 @@ static uint32_t ggml_vk_guess_split_k(ggml_backend_vk_context * ctx, uint32_t m,
     }
 
     uint32_t split_k = 1;
-    if (ctx->device->shader_core_count != 0 && m >= pipeline->wg_denoms[0] && n >= pipeline->wg_denoms[1]) {
+    if (ctx->device->shader_core_count != 0 && n >= pipeline->wg_denoms[1]) {
         // If k is 'large' and the SMs will fill less than halfway, use split_k.
         uint32_t m_tiles = CEIL_DIV(m, pipeline->wg_denoms[0]);
         uint32_t n_tiles = CEIL_DIV(n, pipeline->wg_denoms[1]);

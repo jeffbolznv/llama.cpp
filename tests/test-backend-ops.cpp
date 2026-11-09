@@ -10064,6 +10064,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
 
+    for (ggml_type type : all_types) {
+        for (int n : {3, 4, 5, 8, 9, 16, 17, 24, 25, 32, 33}) {
+            test_cases.emplace_back(new test_mul_mat_weights(type, GGML_TYPE_F32, 17, n, 256));
+            test_cases.emplace_back(new test_mul_mat_weights(type, GGML_TYPE_F32, 37, n, 768));
+        }
+    }
+    for (int n : {9, 17, 25, 33}) {
+        for (int k : {32, 96, 288}) {
+            test_cases.emplace_back(new test_mul_mat_weights(GGML_TYPE_Q8_0, GGML_TYPE_F32, 33, n, k));
+        }
+    }
+
+    for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
+        for (int n : {4, 9, 17, 33}) {
+            for (int k : {17, 65, 96}) {
+                test_cases.emplace_back(new test_mul_mat_weights(type, GGML_TYPE_F32, 33, n, k));
+            }
+        }
+    }
+
     // unary ops
     // TODO: add GGML_UNARY_OP_SOFTPLUS test that is sensitive to using `log1p(exp(x))` vs `log(exp(x) + 1)`
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {
@@ -12901,6 +12921,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_b : {GGML_TYPE_F32}) {
                 test_cases.emplace_back(new test_mul_mat(type_a, type_b, 4096, bs, 14336, {1,  1}, {1, 1}));
             }
+        }
+    }
+
+    for (ggml_type type : {GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
+        for (int n : {1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 24, 25, 32, 33}) {
+            test_cases.emplace_back(new test_mul_mat_weights(type, GGML_TYPE_F32, 4096, n, 14336));
+            test_cases.emplace_back(new test_mul_mat_weights(type, GGML_TYPE_F32, 14336, n, 4096));
         }
     }
 

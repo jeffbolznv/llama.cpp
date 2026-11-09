@@ -221,7 +221,7 @@ f16vec4 dequantFuncQ5_1_v(const in decodeBufQ5_1 bl, const in uint blockCoords[2
 }
 
 layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ8_0 {
-   block_q8_0_packed16 block;
+   readonly block_q8_0_packed16 block;
 };
 
 float16_t dequantFuncQ8_0(const in decodeBufQ8_0 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
@@ -442,19 +442,19 @@ f16vec4 dequantFuncQ3_K_v(const in decodeBufQ3_K bl, const in uint blockCoords[2
 }
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ4_K {
-   block_q4_K block;
+   readonly block_q4_K block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ4_K_packed16 {
-   block_q4_K_packed16 block;
+   readonly block_q4_K_packed16 block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ4_K_packed32 {
-   block_q4_K_packed32 block;
+   readonly block_q4_K_packed32 block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ4_K_packed128 {
-   block_q4_K_packed128 block;
+   readonly block_q4_K_packed128 block;
 };
 
 #if defined(IS_MUL_MM2)
@@ -650,19 +650,19 @@ f16vec4 dequantFuncQ4_K_v(const in decodeBufQ4_K bl, const in uint blockCoords[2
 }
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ5_K {
-   block_q5_K block;
+   readonly block_q5_K block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ5_K_packed16 {
-   block_q5_K_packed16 block;
+   readonly block_q5_K_packed16 block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ5_K_packed128 {
-   block_q5_K_packed128 block;
+   readonly block_q5_K_packed128 block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ5_K_packed32 {
-   block_q5_K_packed32 block;
+   readonly block_q5_K_packed32 block;
 };
 
 float16_t dequantFuncQ5_K(const in decodeBufQ5_K bl, const in uint blockCoords[2], const in uint coordInBlock[2])
@@ -771,11 +771,11 @@ f16vec4 dequantFuncQ5_K_v(const in decodeBufQ5_K bl, const in uint blockCoords[2
 }
 
 layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ6_K {
-   block_q6_K block;
+   readonly block_q6_K block;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer decodeBufQ6_K_packed16 {
-   block_q6_K_packed16 block;
+   readonly block_q6_K_packed16 block;
 };
 
 float16_t dequantFuncQ6_K(const in decodeBufQ6_K bl, const in uint blockCoords[2], const in uint coordInBlock[2])

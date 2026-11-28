@@ -9153,18 +9153,29 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
     // N=32 avoids the cm1 prefill block_rows doubling
     vk_fa_tuning_params tuning_params = get_fa_tuning_params(ctx->device, HSK, HSV, 32, KV, k_type_eff, v_type_eff, f32acc, qk_ratio);
     const uint32_t max_gqa = std::min(tuning_params.block_rows, 32u);
-
-    if (N <= 8 && qk_ratio > 1 && qk_ratio <= max_gqa &&
-        qk_ratio * nek2 == neq2 && nek2 == nev2 && nem2 <= 1) {
-        // grouped query attention - make the N dimension equal to gqa_ratio, reduce
-        // workgroups proportionally in y dimension. The shader will detect gqa_ratio > 1
-        // and change addressing calculations to index Q's dimension 2.
-        gqa_ratio = qk_ratio;
-        N = gqa_ratio;
-        workgroups_y /= gqa_ratio;
+    // more q heads per kv head than that (e.g. MLA): use groups of q heads on the same kv head, not one workgroup per head
+    uint32_t gqa_group = qk_ratio <= max_gqa ? qk_ratio : 1;
+    if (qk_ratio > max_gqa) {
+        gqa_group = max_gqa;
+        while (qk_ratio % gqa_group != 0) {
+            --gqa_group;
+        }
     }
 
-    tuning_params = get_fa_tuning_params(ctx->device, HSK, HSV, N, KV, k_type_eff, v_type_eff, f32acc, qk_ratio);
+    if (N <= 8 && gqa_group > 1 &&
+        qk_ratio * nek2 == neq2 && nek2 == nev2 && nem2 <= 1) {
+        tuning_params = get_fa_tuning_params(ctx->device, HSK, HSV, gqa_group, KV, k_type_eff, v_type_eff, f32acc, qk_ratio);
+        // Retuning can shrink the tile to fit in shared memory.
+        if (gqa_group <= tuning_params.block_rows) {
+            gqa_ratio = gqa_group;
+            N = gqa_ratio;
+            workgroups_y /= gqa_ratio;
+        }
+    }
+
+    if (gqa_ratio == 1) {
+        tuning_params = get_fa_tuning_params(ctx->device, HSK, HSV, N, KV, k_type_eff, v_type_eff, f32acc, qk_ratio);
+    }
 
     float scale         = 1.0f;
     float max_bias      = 0.0f;

@@ -9383,6 +9383,9 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
     }
     const uint32_t Tr = CEIL_DIV(N, Br);
 
+    // coopmat2 with HSV >= 512: one workgroup uses all registers of an SM, so more splits than SMs only add a second wave
+    const bool one_wave = tuning_params.path == FA_COOPMAT2 && HSV >= 512 && gqa_ratio > 1;
+
     // Try to use split_k when KV is large enough to be worth the overhead.
     // Sparse: split_kv carries n_kv_max, split_k partitions its blocks for occupancy.
     if (use_sparse) {
@@ -9397,7 +9400,8 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
         const uint32_t per_blocks = CEIL_DIV(total_blocks, split_k);
         split_k = CEIL_DIV(total_blocks, per_blocks);
     } else if (gqa_ratio > 1 && workgroups_x <= Br) {
-        split_k = shader_core_count * 2 / (workgroups_x * workgroups_y * workgroups_z);
+        const uint32_t target_wgs = one_wave ? shader_core_count : shader_core_count * 2;
+        split_k = std::max(1u, target_wgs / (workgroups_x * workgroups_y * workgroups_z));
     } else if (gqa_ratio <= 1) {
         uint32_t total_wgs_no_split = Tr * workgroups_y * workgroups_z;
         if (total_wgs_no_split < shader_core_count * 2) {
@@ -9408,7 +9412,7 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
     if (!use_sparse && split_k > 1) {
         // Try to evenly split KV into split_k chunks, but it needs to be a multiple
         // of "align", so recompute split_k based on that.
-        split_kv = ROUNDUP_POW2(std::max(1u, KV / split_k), alignment);
+        split_kv = ROUNDUP_POW2(std::max(1u, one_wave ? CEIL_DIV(KV, split_k) : KV / split_k), alignment);
         split_k = CEIL_DIV(KV, split_kv);
     }
 
